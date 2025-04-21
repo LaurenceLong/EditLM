@@ -21,7 +21,7 @@ EXCLUDE_DIRS = {
 EXCLUDE_FILES = {
     '.DS_Store',
     'assemble.py',
-    'create.py',
+    'disassemble.py',
     'response.txt',
     # 添加其他你想要排除的文件
 }
