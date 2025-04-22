@@ -28,7 +28,7 @@ def save_ckpt(model, opt, step, path, tokenizer=None):
         print(f"Tokenizer saved to {directory}")
 
 
-def load_model_from_ckpt(ckpt_path, base_model=None):
+def load_model_from_ckpt(ckpt_path, base_model=None, model_class=EditLMHF):
     """从检查点加载模型和tokenizer"""
     # 加载检查点
     ckpt = torch.load(ckpt_path, map_location='cpu')
@@ -52,7 +52,7 @@ def load_model_from_ckpt(ckpt_path, base_model=None):
             raise ValueError("No tokenizer found and no base_model provided")
 
     # 创建模型
-    model = EditLMHF(base_model=base_model if base_model else directory)
+    model = model_class(base_model=base_model if base_model else directory)
     model.load_state_dict(ckpt['model'])
 
     return model, tokenizer, ckpt.get('step', 0)

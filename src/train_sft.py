@@ -1,11 +1,13 @@
 import argparse
+
 import torch
 import tqdm
 from torch.cuda.amp import autocast, GradScaler
 
 from config import ModelConfig, TrainConfig
-from data import get_loader, tokenizer
+from data import get_loader
 from model import EditLM
+from tokenizer import get_tokenizer
 from utils import save_ckpt, WarmupCosine
 
 
@@ -14,9 +16,12 @@ def main():
     ap.add_argument("--outdir", required=True)
     args = ap.parse_args()
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    tokenizer = get_tokenizer("Qwen/Qwen2.5-0.5B")
+
     mcfg = ModelConfig(vocab_size=tokenizer.vocab_size)
     tcfg = TrainConfig()
-    device = "cuda"
 
     model = EditLM(mcfg, pad_id=tokenizer.pad_token_id, eos_id=tokenizer.eos_token_id).to(device)
     if tcfg.fp16:

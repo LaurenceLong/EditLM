@@ -2,7 +2,7 @@ from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoConfig
+from transformers import AutoModelForCausalLM
 
 
 # ----------------------------------------------

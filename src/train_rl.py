@@ -1,11 +1,12 @@
 import argparse
+
 import torch
 import tqdm
 
 from config import ModelConfig, TrainConfig
-from data import get_loader, tokenizer
+from data import get_loader
 from model import EditLM
-from utils import load_ckpt, save_ckpt
+from utils import load_model_from_ckpt, save_ckpt
 
 
 def compute_reward(logprobs):  # 简单示例：logp(up) 越高奖励越大
@@ -18,15 +19,16 @@ def main():
     ap.add_argument("--outdir", required=True)
     args = ap.parse_args()
 
-    device = "cuda"
-    mcfg = ModelConfig(vocab_size=tokenizer.eos_token_id)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    policy, tokenizer, step0 = load_model_from_ckpt(args.ckpt, model_class=EditLM)
+
+    mcfg = ModelConfig(vocab_size=tokenizer.vocab_size)
     tcfg = TrainConfig(batch_size=8, total_steps=20_000, lr=5e-5)
 
     policy = EditLM(mcfg, tokenizer.pad_token_id, tokenizer.eos_token_id).to(device).half()
     ref = EditLM(mcfg, tokenizer.pad_token_id, tokenizer.eos_token_id).to(device).half().eval()
 
     opt = torch.optim.AdamW(policy.parameters(), lr=tcfg.lr)
-    step0 = load_ckpt(policy, opt, args.ckpt, device)
 
     dl = get_loader("validation", tcfg)
     iterator = iter(dl)
@@ -69,4 +71,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
