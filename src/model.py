@@ -146,3 +146,4 @@ class EditLM(nn.Module):
             loss = tok_loss + self.cfg.index_loss_weight * idx_loss
             out.update(loss=loss, tok_loss=tok_loss, idx_loss=idx_loss)
         return out
+

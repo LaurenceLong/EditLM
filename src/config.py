@@ -26,3 +26,4 @@ class TrainConfig:
     grad_clip: float = 1.0
     fp16: bool = True
     ckpt_every: int = 1_000
+

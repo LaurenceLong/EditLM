@@ -52,8 +52,9 @@ def main():
 
         pbar.set_description(f"loss {loss.item():.3f}")
         if step % tcfg.ckpt_every == 0:
-            save_ckpt(model, opt, step, f"{args.outdir}/step{step}.pt")
+            save_ckpt(model, opt, step, f"{args.outdir}/sft_step{step}.pt")
 
 
 if __name__ == "__main__":
     main()
+

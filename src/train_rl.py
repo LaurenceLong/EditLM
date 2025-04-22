@@ -64,8 +64,9 @@ def main():
             opt.step()
 
         if step % 1000 == 0:
-            save_ckpt(policy, opt, step, f"{args.outdir}/step{step}.pt")
+            save_ckpt(policy, opt, step, f"{args.outdir}/rl_step{step}.pt")
 
 
 if __name__ == "__main__":
     main()
+
