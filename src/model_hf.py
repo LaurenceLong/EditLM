@@ -6,8 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, PretrainedConfig
 
-from src.tokenizer import get_tokenizer
-
 
 class EditLMHF(nn.Module):
     """
@@ -28,7 +26,6 @@ class EditLMHF(nn.Module):
             base_model,
             low_cpu_mem_usage=True,
         )
-        self.tokenizer = get_tokenizer(base_model, use_fast=True)
         self.backbone.requires_grad_(True)
 
         # Basic attributes
