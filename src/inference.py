@@ -210,37 +210,35 @@ def save_results(results: List[Dict], args):
         # 多个结果或指定了输出文件
         output_file = args.output_file or os.path.join(args.output_dir, "batch_results.json")
 
-    output_path = os.path.join(args.output_dir, output_file)
-
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_file, 'w', encoding='utf-8') as fd:
         if len(results) == 1:
             # 单个结果直接保存
-            json.dump(results[0], f, ensure_ascii=False, indent=2)
+            json.dump(results[0], fd, ensure_ascii=False, indent=2)
         else:
             # 多个结果保存为列表
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            json.dump(results, fd, ensure_ascii=False, indent=2)
 
-    print(f"Results saved to {output_path}")
+    print(f"Results saved to {output_file}")
 
     # 同时输出文本摘要报告
-    report_path = output_path.replace('.json', '_summary.txt')
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(f"编辑摘要报告 - 共处理{len(results)}个文本\n")
-        f.write("=" * 50 + "\n\n")
+    report_path = output_file.replace('.json', '_summary.txt')
+    with open(report_path, 'w', encoding='utf-8') as fd:
+        fd.write(f"编辑摘要报告 - 共处理{len(results)}个文本\n")
+        fd.write("=" * 50 + "\n\n")
 
         for i, result in enumerate(results):
-            f.write(f"样本 #{i + 1}:\n")
-            f.write(f"原始文本: {result['original_text']}\n")
+            fd.write(f"样本 #{i + 1}:\n")
+            fd.write(f"原始文本: {result['original_text']}\n")
 
             if 'edited_text' in result:  # 单次编辑
-                f.write(f"编辑后文本: {result['edited_text']}\n")
-                f.write(
+                fd.write(f"编辑后文本: {result['edited_text']}\n")
+                fd.write(
                     f"编辑操作: {result['edit_info']['operation']} {result['edit_info']['token']} at position {result['edit_info']['position']}\n")
             else:  # 连续编辑
-                f.write(f"最终文本: {result['final_text']}\n")
-                f.write(f"编辑次数: {result['num_edits']}\n")
+                fd.write(f"最终文本: {result['final_text']}\n")
+                fd.write(f"编辑次数: {result['num_edits']}\n")
 
-            f.write("\n" + "-" * 50 + "\n\n")
+            fd.write("\n" + "-" * 50 + "\n\n")
 
     print(f"Summary report saved to {report_path}")
 
