@@ -1,85 +1,276 @@
+import warnings  # To warn if attention layers aren't found
 from typing import Optional, Dict
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 
-# ----------------------------------------------
 class EditLMHF(nn.Module):
     """
-    复用 HuggingFace 预训练模型作为 backbone，仅新增：
-      1. triple_proj  : 3D -> D
-      2. index_head   : gap 位置分类
-      3. token_head   : 插入 token 预测（共享词嵌入）
+    Improved EditLMHF that combines local context and global information for text editing:
+    1. Uses [left, GAP, right] structure for local representation
+    2. Leverages backbone's last-layer attention projections for global context
+    3. Preserves original LM head for sequence-end predictions
+    4. Uses fused local-global representations for in-sequence editing
     """
 
     def __init__(self,
                  base_model: str = "facebook/opt-125m",
-                 index_loss_weight: float = 1.0):
+                 index_loss_weight: float = 1.0,
+                 freeze_shared_attn: bool = False):  # Option to freeze shared weights
         super().__init__()
 
         self.backbone = AutoModelForCausalLM.from_pretrained(
             base_model,
-            # torch_dtype=torch.float16,  # 直接以 fp16 载入，省内存+显存
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=True,
         )
-        self.backbone.requires_grad_(True)  # 若想冻结，只需改成 False
+        self.backbone.requires_grad_(True)
 
-        # ---- 一些通用属性 ----------------------------------------------------
+        # Basic attributes
         config = self.backbone.config
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
         self.index_loss_weight = index_loss_weight
 
-        # ---- EditLM 额外模块 --------------------------------------------------
+        # Learnable embeddings
+        self.gap_token_embed = nn.Parameter(torch.randn(1, 1, self.hidden_size) * 0.02)  # GAP token embedding
+        self.boundary_embed = nn.Parameter(torch.zeros(1, 1, self.hidden_size))  # Boundary padding
+
+        # Local triple projection (left, gap, right)
         self.triple_proj = nn.Linear(3 * self.hidden_size, self.hidden_size, bias=False)
-        self.index_head = nn.Linear(self.hidden_size, 1, bias=False)
-        self.token_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
-        # 词向量权重共享 - 根据不同模型架构可能需要调整
-        try:
-            self.token_head.weight = self.backbone.get_input_embeddings().weight
-        except AttributeError:
-            # 防止某些模型没有标准的get_input_embeddings方法
-            if hasattr(self.backbone, 'transformer') and hasattr(self.backbone.transformer, 'wte'):
-                # GPT类模型
-                self.token_head.weight = self.backbone.transformer.wte.weight
-            elif hasattr(self.backbone, 'model') and hasattr(self.backbone.model, 'embed_tokens'):
-                # OPT类模型
-                self.token_head.weight = self.backbone.model.embed_tokens.weight
+        # Share backbone's attention projections
+        self.q_proj, self.k_proj, self.v_proj, self.o_proj = None, None, None, None
+        self.num_heads = None
+        self._find_and_share_attn_projections(config, freeze_shared_attn)
+
+        # Fusion layer for local and global contexts
+        self.fuse_proj = nn.Linear(2 * self.hidden_size, self.hidden_size, bias=False)
+
+        # Output heads
+        self.index_head = nn.Linear(self.hidden_size, 1, bias=False)  # Predicts edit position
+        self.edit_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)  # Predicts edited token
+
+        # Share weights with input embeddings
+        self._share_embedding_weights()
+
+    def _find_and_share_attn_projections(self, config: PretrainedConfig, freeze: bool):
+        """
+        Find and share attention projection layers from the backbone's last layer.
+        """
+        self.q_proj, self.k_proj, self.v_proj, self.o_proj = None, None, None, None
+        self.num_heads = None
+
+        # Get model type or infer from class name
+        model_type = getattr(config, "model_type", None)
+        if model_type is None:
+            warnings.warn("Could not determine model_type from config. Attempting to infer.")
+            model_class_name = self.backbone.__class__.__name__.lower()
+            if "opt" in model_class_name:
+                model_type = "opt"
+            elif "llama" in model_class_name:
+                model_type = "llama"
+            elif "qwen2" in model_class_name:
+                model_type = "qwen2"
             else:
-                print("Warning: Unable to share token embedding weights automatically")
+                warnings.warn(f"Could not infer model_type. Aborting projection sharing.")
+                return
+        else:
+            model_type = model_type.lower()
 
-    # -------------------------------------------------------------------------
-    def _build_gap_state(self, h: torch.Tensor) -> torch.Tensor:
+        print(f"Finding attention projections for model type: {model_type}")
+        last_layer = None
+        attn_module = None
+
+        try:
+            # Find last layer and attention module based on model architecture
+            if model_type == "opt":
+                decoder = getattr(self.backbone, "model", None)
+                layers_module = getattr(decoder, "decoder", None)
+                layers = getattr(layers_module, "layers", None)
+                if layers:
+                    last_layer = layers[-1]
+                    attn_module = getattr(last_layer, "self_attn", None)
+            elif model_type in ["llama", "mistral", "gemma", "qwen2"]:
+                model = getattr(self.backbone, "model", None)
+                layers = getattr(model, "layers", None)
+                if layers:
+                    last_layer = layers[-1]
+                    attn_module = getattr(last_layer, "self_attn", None)
+            elif model_type == "gpt_neox":
+                transformer = getattr(self.backbone, "transformer", None)
+                layers = getattr(transformer, "h", None)
+                if layers:
+                    last_layer = layers[-1]
+                    attn_module = getattr(last_layer, "attention", None)
+            elif model_type == "gpt2":
+                transformer = getattr(self.backbone, "transformer", None)
+                layers = getattr(transformer, "h", None)
+                if layers:
+                    last_layer = layers[-1]
+                    attn_module = getattr(last_layer, "attn", None)
+            elif model_type == "bloom":
+                transformer = getattr(self.backbone, "transformer", None)
+                layers = getattr(transformer, "h", None)
+                if layers:
+                    last_layer = layers[-1]
+                    attn_module = getattr(last_layer, "self_attention", None)
+            else:
+                # Generic attempt for unsupported model types
+                warnings.warn(f"Model type '{model_type}' not explicitly supported. Trying generic access.")
+                model_or_transformer = getattr(self.backbone, "model", getattr(self.backbone, "transformer", None))
+                layers = getattr(model_or_transformer, "layers", getattr(model_or_transformer, "h", None))
+                if layers:
+                    last_layer = layers[-1]
+                    attn_module = getattr(last_layer, "self_attn",
+                                          getattr(last_layer, "attention", getattr(last_layer, "attn", None)))
+
+            # Get projection layers if attention module was found
+            if attn_module:
+                print(f"Found attention module: {type(attn_module)}")
+
+                # Try to get separate Q, K, V projections
+                q_proj = getattr(attn_module, "q_proj", None)
+                k_proj = getattr(attn_module, "k_proj", None)
+                v_proj = getattr(attn_module, "v_proj", None)
+                o_proj = getattr(attn_module, "o_proj",
+                                 getattr(attn_module, "dense", getattr(attn_module, "out_proj", None)))
+
+                if all([q_proj, k_proj, v_proj, o_proj]):
+                    # Found all separate projections
+                    self.q_proj, self.k_proj, self.v_proj, self.o_proj = q_proj, k_proj, v_proj, o_proj
+                    self.num_heads = getattr(attn_module, "num_heads",
+                                             getattr(attn_module, "num_attention_heads",
+                                                     getattr(config, "num_attention_heads", None)))
+                    print(f"Found separate Q/K/V/O projections for {model_type}.")
+
+                # Handle special cases with combined QKV projections
+                elif model_type == "gpt2" and hasattr(attn_module, 'c_attn') and hasattr(attn_module, 'c_proj'):
+                    warnings.warn(f"Model uses combined QKV projection. Only sharing output projection.")
+                    self.o_proj = getattr(attn_module, 'c_proj', None)
+                    self.num_heads = getattr(attn_module, "num_heads", getattr(config, "num_attention_heads", None))
+
+                elif model_type == "bloom" and hasattr(attn_module, "query_key_value") and hasattr(attn_module,
+                                                                                                   "dense"):
+                    warnings.warn(f"Model uses combined query_key_value. Only sharing output projection.")
+                    self.o_proj = getattr(attn_module, 'dense', None)
+                    self.num_heads = getattr(attn_module, "num_heads", getattr(config, "num_attention_heads", None))
+
+                else:
+                    # Check for other combined projection patterns
+                    combined_qkv = getattr(attn_module, "query_key_value", getattr(attn_module, "c_attn", None))
+                    output_p = getattr(attn_module, "dense",
+                                       getattr(attn_module, "o_proj", getattr(attn_module, "c_proj", None)))
+
+                    if combined_qkv and output_p:
+                        warnings.warn(f"Found combined QKV projection. Only sharing output projection.")
+                        self.o_proj = output_p
+                        self.num_heads = getattr(attn_module, "num_heads", getattr(config, "num_attention_heads", None))
+                    else:
+                        warnings.warn(f"Could not find required projection layers. Sharing failed.")
+
+                    # Try to get num_heads even if projections weren't found
+                    if self.num_heads is None:
+                        self.num_heads = getattr(attn_module, "num_heads", getattr(config, "num_attention_heads", None))
+            else:
+                warnings.warn(f"Could not locate attention module. Auto-sharing failed.")
+                self.num_heads = getattr(config, "num_attention_heads", None)
+
+        except Exception as e:
+            warnings.warn(f"Error during attention projection sharing: {e}")
+            if self.num_heads is None:
+                self.num_heads = getattr(config, "num_attention_heads", None)
+
+        # Final check and freezing
+        if not all([self.q_proj, self.k_proj, self.v_proj, self.o_proj]):
+            warnings.warn("Failed to find all projection layers. Global context will be disabled.")
+            self.q_proj, self.k_proj, self.v_proj, self.o_proj = None, None, None, None
+        elif self.num_heads is None:
+            warnings.warn("Could not determine number of attention heads.")
+        else:
+            print(f"Successfully shared attention projections (Heads: {self.num_heads}).")
+            if freeze:
+                for proj in [self.q_proj, self.k_proj, self.v_proj, self.o_proj]:
+                    if proj: proj.requires_grad_(False)
+                print("Attention projections frozen.")
+
+    def _share_embedding_weights(self):
+        """Share weights between edit_head and input embeddings."""
+        try:
+            input_embeddings = self.backbone.get_input_embeddings()
+            self.edit_head.weight = input_embeddings.weight
+            print("Successfully shared weights between edit_head and input embeddings.")
+        except AttributeError:
+            warnings.warn("Could not share edit_head and input embedding weights.")
+
+    def _build_gap_state(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
-        h : [B, L, D]  ->  gap_state : [B, L+1, D]
+        Build representation for each possible gap position, combining local and global context.
+
+        Args:
+            hidden_states: Last layer hidden states [B, L, D]
+
+        Returns:
+            Fused gap representation [B, L+1, D]
         """
-        B, L, D = h.size()
-        z = torch.zeros(B, 1, D, device=h.device, dtype=h.dtype)
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        dtype = hidden_states.dtype
 
-        # 修复: 确保所有张量都有相同的长度
-        h_l = torch.cat([z, h[:, :-1]], 1)  # 左上下文 [B, L, D]
-        h_c = h  # 中间上下文 [B, L, D]
-        h_r = torch.cat([h[:, 1:], z], 1)  # 右上下文 [B, L, D]
+        # 1. Build local triplet representation [left, gap, right]
+        padding = self.boundary_embed.expand(batch_size, -1, -1).to(dtype=dtype)
 
-        # 为了创建L+1长度的结果，我们需要额外处理边界情况
-        # 添加最后一个gap位置（句子结束后）
-        h_l_last = h[:, -1:, :]  # 最后一个token作为左上下文
-        h_c_last = z  # 句子结束没有中间上下文
-        h_r_last = z  # 句子结束没有右上下文
+        # Create left, right and center contexts
+        left_context = torch.cat([padding, hidden_states], dim=1)  # [B, L+1, D]
+        right_context = torch.cat([hidden_states, padding], dim=1)  # [B, L+1, D]
+        center_context = self.gap_token_embed.expand(
+            batch_size, seq_len + 1, hidden_dim).to(dtype=dtype)  # [B, L+1, D]
 
-        # 拼接所有位置信息
-        h_l = torch.cat([h_l, h_l_last], 1)  # [B, L+1, D]
-        h_c = torch.cat([h_c, h_c_last], 1)  # [B, L+1, D]
-        h_r = torch.cat([h_r, h_r_last], 1)  # [B, L+1, D]
+        # Combine and project local representation
+        local_triple = torch.cat([left_context, center_context, right_context], dim=-1)  # [B, L+1, 3*D]
+        gap_local = self.triple_proj(local_triple)  # [B, L+1, D]
 
-        # 组合三元组表示
-        triple = torch.cat([h_l, h_c, h_r], dim=-1)  # [B, L+1, 3D]
-        return self.triple_proj(triple)  # [B, L+1, D]
+        # 2. Calculate global context if attention projections are available
+        if not all([self.q_proj, self.k_proj, self.v_proj, self.o_proj, self.num_heads]):
+            # Fall back to zeros if global context unavailable
+            global_ctx = torch.zeros_like(gap_local)
+        else:
+            head_dim = hidden_dim // self.num_heads
 
-    # -------------------------------------------------------------------------
+            # Project queries, keys and values
+            query = self.q_proj(gap_local)  # [B, L+1, D]
+            key = self.k_proj(hidden_states)  # [B, L, D]
+            value = self.v_proj(hidden_states)  # [B, L, D]
+
+            # Reshape for multi-head attention
+            def split_heads(tensor, num_heads, head_dim):
+                B, S, D = tensor.shape
+                return tensor.view(B, S, num_heads, head_dim).transpose(1, 2)
+
+            query_split = split_heads(query, self.num_heads, head_dim)  # [B, H, L+1, d]
+            key_split = split_heads(key, self.num_heads, head_dim)  # [B, H, L, d]
+            value_split = split_heads(value, self.num_heads, head_dim)  # [B, H, L, d]
+
+            # Apply scaled dot-product attention
+            attn_output = F.scaled_dot_product_attention(
+                query_split, key_split, value_split,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False
+            )  # [B, H, L+1, d]
+
+            # Reshape and project output
+            attn_output = attn_output.transpose(1, 2).contiguous().view(
+                batch_size, seq_len + 1, hidden_dim)  # [B, L+1, D]
+            global_ctx = self.o_proj(attn_output)  # [B, L+1, D]
+
+        # 3. Fuse local and global representations
+        fused_input = torch.cat([gap_local, global_ctx], dim=-1)  # [B, L+1, 2*D]
+        fused_gap_state = self.fuse_proj(fused_input)  # [B, L+1, D]
+
+        return fused_gap_state
+
     def forward(self,
                 input_ids: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None,
@@ -87,10 +278,24 @@ class EditLMHF(nn.Module):
                 target_token: Optional[torch.Tensor] = None
                 ) -> Dict[str, torch.Tensor]:
         """
-        训练模式：传入 target_index & target_token，返回带 loss 的 dict
-        推理模式：仅传 input_ids，返回 logits
+        Forward pass for both training and inference.
+
+        Args:
+            input_ids: Input sequence [B, L]
+            attention_mask: Attention mask [B, L] (optional but recommended)
+            target_index: Target edit position indices [B], range [0, L] (training only)
+            target_token: Target token IDs [B] (training only)
+
+        Returns:
+            Dict with keys:
+            - 'index_logits': Scores for each edit position [B, L+1]
+            - 'token_logits': Token prediction scores [B, V]
+            - 'loss', 'tok_loss', 'idx_loss': Losses (training only)
+            - 'pred_index': Predicted edit positions [B] (inference only)
         """
-        # HF backbone 返回 last_hidden_state [B, L, D]
+        batch_size, seq_len = input_ids.shape
+
+        # 1. Get hidden states and LM logits from backbone
         outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -98,33 +303,77 @@ class EditLMHF(nn.Module):
             return_dict=True
         )
 
-        # 获取最后一层隐藏状态
+        # Get hidden states from backbone output
         if hasattr(outputs, 'last_hidden_state'):
-            h = outputs.last_hidden_state
+            hidden_states = outputs.last_hidden_state  # [B, L, D]
+        elif hasattr(outputs, 'hidden_states'):
+            hidden_states = outputs.hidden_states[-1]  # [B, L, D]
         else:
-            h = outputs.hidden_states[-1]
+            raise AttributeError("Could not find hidden states in backbone output.")
 
-        gap = self._build_gap_state(h)  # [B, L+1, D]
-        idx_logits = self.index_head(gap).squeeze(-1)  # [B, L+1]
-        tok_logits_all = self.token_head(gap)  # [B, L+1, V]
+        # Get language model logits
+        if hasattr(outputs, 'logits'):
+            lm_logits = outputs.logits  # [B, L, V]
+        elif hasattr(self.backbone, 'lm_head'):
+            lm_logits = self.backbone.lm_head(hidden_states)  # [B, L, V]
+        else:
+            raise AttributeError("Could not find logits or lm_head in backbone.")
 
-        if target_index is None:  # ------ 推理 --------------------
+        # 2. Build gap representations with fused local and global context
+        fused_gap_state = self._build_gap_state(hidden_states)  # [B, L+1, D]
+
+        # 3. Compute edit position and token logits
+        idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
+        edit_logits_all = self.edit_head(fused_gap_state)  # [B, L+1, V]
+
+        # 4. Inference or training logic
+        if target_index is None:
+            # === Inference mode ===
             pred_index = idx_logits.argmax(-1)  # [B]
-            gather = pred_index.view(-1, 1, 1).expand(-1, 1, tok_logits_all.size(-1))
-            tok_logits = tok_logits_all.gather(1, gather).squeeze(1)
-            return dict(index_logits=idx_logits, token_logits=tok_logits)
 
-        # --------------------------- 训练 -------------------------------------
-        B = input_ids.size(0)
-        gather = target_index.view(B, 1, 1).expand(-1, 1, tok_logits_all.size(-1))
-        tok_logits = tok_logits_all.gather(1, gather).squeeze(1)  # [B, V]
+            # gather edit logits at predicted index
+            gathered_edit = torch.gather(
+                edit_logits_all,  # [B, L+1, V]
+                dim=1,
+                index=pred_index.view(-1, 1, 1).expand(-1, 1, self.vocab_size)  # [B,1,V]
+            ).squeeze(1)  # [B, V]
 
-        tok_loss = nn.functional.cross_entropy(tok_logits, target_token)
-        idx_loss = nn.functional.cross_entropy(idx_logits, target_index)
-        loss = tok_loss + self.index_loss_weight * idx_loss
+            # 对应句末插入时，用 backbone LM logits 的最后一个 token
+            lm_last_token = lm_logits[:, seq_len - 1, :]  # [B, V]
+            # 使用torch.eq确保生成张量而非布尔标量
+            use_lm_mask = torch.eq(pred_index, seq_len).unsqueeze(-1).expand(-1, self.vocab_size)  # [B,V]
 
-        return dict(loss=loss,
-                    tok_loss=tok_loss,
-                    idx_loss=idx_loss,
-                    index_logits=idx_logits,
-                    token_logits=tok_logits)
+            final_token_logits = torch.where(use_lm_mask, lm_last_token, gathered_edit)
+
+            return dict(
+                index_logits=idx_logits,
+                token_logits=final_token_logits,
+                pred_index=pred_index
+            )
+
+        else:
+            # === Training mode ===
+            # gather edit logits at target_index
+            gathered_edit = torch.gather(
+                edit_logits_all,  # [B, L+1, V]
+                dim=1,
+                index=target_index.view(-1, 1, 1).expand(-1, 1, self.vocab_size)
+            ).squeeze(1)  # [B, V]
+
+            lm_last_token = lm_logits[:, seq_len - 1, :]  # [B, V]
+            # 使用torch.eq确保生成张量而非布尔标量
+            use_lm_mask = torch.eq(target_index, seq_len).unsqueeze(-1).expand(-1, self.vocab_size)  # [B,V]
+
+            tok_logits_for_loss = torch.where(use_lm_mask, lm_last_token, gathered_edit)  # [B,V]
+
+            tok_loss = F.cross_entropy(tok_logits_for_loss, target_token)
+            idx_loss = F.cross_entropy(idx_logits, target_index)
+            loss = tok_loss + self.index_loss_weight * idx_loss
+
+            return dict(
+                loss=loss,
+                tok_loss=tok_loss,
+                idx_loss=idx_loss,
+                index_logits=idx_logits,
+                token_logits=tok_logits_for_loss
+            )

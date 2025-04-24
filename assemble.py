@@ -23,6 +23,7 @@ EXCLUDE_FILES = {
     'assemble.py',
     'disassemble.py',
     'response.txt',
+    'test_tokenization.py',
     # 添加其他你想要排除的文件
 }
 
@@ -201,9 +202,9 @@ def main():
     final_prompt = f"# 项目总览\n\n```\n{project_structure}\n```\n---\n\n{files_content}"
 
     # 4. 打印或保存 prompt
-    print("\n--- Generated Prompt ---")
+    print("\n--- Start ---")
     print(final_prompt)
-    print("--- End of Prompt ---")
+    print("--- End ---")
 
     # 可选：将 prompt 保存到文件
     # output_filename = "project_prompt.md"
