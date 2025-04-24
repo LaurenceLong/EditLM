@@ -234,7 +234,7 @@ def main():
     )
     # Scheduler total steps should correspond to the editing phase steps
     sched = WarmupCosine(opt, cfg, cfg.total_steps)
-    scaler = torch.amp.GradScaler(device, enabled=cfg.fp16)
+    scaler = torch.cuda.amp.GradScaler(enabled=cfg.fp16)
 
     # Load optimizer state if resuming
     if args.from_file and start_step > 0:
