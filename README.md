@@ -95,18 +95,40 @@ python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_fi
 
 ## 评估
 
-支持多种评估方法，包括标准评估、数学错误纠正评估和文本重复纠正评估：
+以下是使用修改后代码进行推理的几种常用命令示例：
+
+### 1. 单个文本的单次编辑推理
 
 ```bash
-# 基本评估 - 比较训练前后的模型
-python src/evaluate.py --base_model "Qwen/Qwen2.5-0.5B" --trained_model "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --data_dir "./src/data/wikitext_processed" --output_dir "./evaluation_results"
+python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --input_text "这是一个示例文本，等待模型进行编辑。" --single_edit
+```
 
-# 添加数学错误纠正评估
-python src/evaluate.py --base_model "Qwen/Qwen2.5-0.5B" --trained_model "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --data_dir "./src/data/wikitext_processed" --evaluate_math --math_dataset "gsm8k"
+### 2. 单个文本的连续编辑（自动生成完整文本）
 
-# 添加文本重复纠正评估并使用质性评估文本
-python src/evaluate.py --base_model "Qwen/Qwen2.5-0.5B" --trained_model "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --data_dir "./src/data/wikitext_processed" --evaluate_repetition --add_default_texts
+```bash
+python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --input_text "这是一个短文本开头，" --max_len 100
+```
 
-# 仅评估特定任务，跳过标准评估
-python src/evaluate.py --base_model "Qwen/Qwen2.5-0.5B" --trained_model "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --data_dir "./src/data/wikitext_processed" --evaluate_repetition --skip_standard
+### 3. 限制最大生成长度的推理
+
+```bash
+python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --input_text "请继续生成这个故事：从前，有一个" --max_len 50 --max_edits 15
+```
+
+### 4. 从文件批量处理多个文本
+
+```bash
+python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --input_file "sample_texts.txt" --max_len 200 --output_file "batch_results.json"
+```
+
+### 5. 从HuggingFace数据集加载文本并推理
+
+```bash
+python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --dataset "gsm8k" --dataset_split "test" --text_column "question" --max_samples 5 --max_len 300
+```
+
+### 6. 使用自定义数据集并指定输出目录
+
+```bash
+python src/inference.py --model_path "./checkpoints/editlm_qwen_edit_only/sft_final_50000.pt" --dataset_path "custom_data.json" --text_column "text" --output_dir "./custom_results" --max_len 150
 ```
