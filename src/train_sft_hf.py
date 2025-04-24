@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 
 from data import collate_fn, DeletionTaskDataset, InsertionTaskDataset
 from model_hf import EditLMHF
-from tokenizer import get_tokenizer, NUM_ADDED_TOKENS, get_del_token_id
+from tokenizer import get_tokenizer, get_del_token_id
 from utils import save_ckpt, WarmupCosine, load_model_from_ckpt
 
 
@@ -208,21 +208,6 @@ def main():
         tokenizer = get_tokenizer(args.base, use_fast=True)
 
         model = EditLMHF(base_model=args.base, index_loss_weight=1.0, tokenizer=tokenizer).to(device)
-        num_added_toks = NUM_ADDED_TOKENS[0]
-
-        # Resize embeddings if new tokens were added
-        if num_added_toks > 0:
-            print(f"调整模型词嵌入大小以包含 {num_added_toks} 个新标记...")
-            model.backbone.resize_token_embeddings(len(tokenizer))
-            # Also resize the edit_head which might share weights or be independent
-            # Ensure edit_head output dim matches the new vocab size
-            if model.edit_head.weight.shape[0] != len(tokenizer):
-                print(f"Resizing edit_head output dimension to {len(tokenizer)}")
-                model.edit_head = nn.Linear(model.hidden_size, len(tokenizer), bias=False)
-                # Re-share weights if they were shared initially
-                model._share_embedding_weights()  # Call the internal method to re-link if needed
-            print(f"模型词嵌入大小调整为: {len(tokenizer)}")
-
     del_token_id = get_del_token_id(tokenizer)
 
     # --- Optimizer and Scheduler ---

@@ -23,6 +23,7 @@ EXCLUDE_FILES = {
     'assemble.py',
     'disassemble.py',
     'response.txt',
+    'data.py',
     'evaluate.py',
     'inference.py',
     'test_tokenization.py',
@@ -46,6 +47,7 @@ INCLUDE_EXTENSIONS = [
 # 项目根目录 (默认是当前脚本所在的目录的父目录，或者就是当前工作目录)
 # 通常你会在项目根目录下运行这个脚本
 ROOT_DIR = os.getcwd()
+
 
 # --- 脚本主体 ---
 
@@ -75,6 +77,7 @@ def get_language_hint(filename):
         # 默认或对于未知类型返回 'text' 或空字符串
         return 'text'
 
+
 def generate_project_structure(root_dir, exclude_dirs, exclude_files, include_extensions):
     """生成项目目录结构的字符串表示"""
     tree_lines = []
@@ -94,7 +97,6 @@ def generate_project_structure(root_dir, exclude_dirs, exclude_files, include_ex
         # 如果无法获取脚本名称（例如在交互式环境中运行），则忽略
         pass
 
-
     for root, dirs, files in os.walk(root_dir, topdown=True):
         # 过滤掉需要排除的目录
         dirs[:] = [d for d in dirs if d not in exclude_dirs_set]
@@ -105,13 +107,13 @@ def generate_project_structure(root_dir, exclude_dirs, exclude_files, include_ex
         else:
             level = relative_root.count(os.sep) + 1
 
-        indent = '    ' * level # 使用4个空格作为缩进
+        indent = '    ' * level  # 使用4个空格作为缩进
 
         # 添加目录到树结构
-        if level > 0: # 不重复添加根目录
+        if level > 0:  # 不重复添加根目录
             dir_name = os.path.basename(root)
             tree_lines.append(f"{indent}├── {dir_name}/")
-            indent += '│   ' # 下一级文件/目录的连接线
+            indent += '│   '  # 下一级文件/目录的连接线
 
         # 过滤并排序文件
         valid_files = []
@@ -124,7 +126,7 @@ def generate_project_structure(root_dir, exclude_dirs, exclude_files, include_ex
                     continue
             valid_files.append(f)
 
-        valid_files.sort() # 保证文件顺序一致
+        valid_files.sort()  # 保证文件顺序一致
 
         # 添加文件到树结构
         num_files = len(valid_files)
@@ -133,6 +135,7 @@ def generate_project_structure(root_dir, exclude_dirs, exclude_files, include_ex
             tree_lines.append(f"{indent}{prefix}{f}")
 
     return "\n".join(tree_lines)
+
 
 def read_files_content(root_dir, exclude_dirs, exclude_files, include_extensions):
     """读取项目中符合条件的文件内容"""
@@ -148,7 +151,7 @@ def read_files_content(root_dir, exclude_dirs, exclude_files, include_extensions
     except IndexError:
         pass
 
-    collected_files = [] # 用于排序
+    collected_files = []  # 用于排序
 
     for root, dirs, files in os.walk(root_dir, topdown=True):
         dirs[:] = [d for d in dirs if d not in exclude_dirs_set]
@@ -167,7 +170,7 @@ def read_files_content(root_dir, exclude_dirs, exclude_files, include_extensions
 
             collected_files.append((relative_path, file_path))
 
-    collected_files.sort() # 按相对路径排序
+    collected_files.sort()  # 按相对路径排序
 
     for relative_path, file_path in collected_files:
         try:
@@ -178,7 +181,8 @@ def read_files_content(root_dir, exclude_dirs, exclude_files, include_extensions
         except Exception as e:
             file_contents.append(f"## {relative_path}\n```text\nError reading file: {e}\n```")
 
-    return "\n---\n\n".join(file_contents) # 使用 '---' 分隔文件内容
+    return "\n---\n\n".join(file_contents)  # 使用 '---' 分隔文件内容
+
 
 def main():
     """主函数，生成并打印 prompt"""
@@ -216,6 +220,7 @@ def main():
     #     print(f"\nPrompt successfully saved to {output_filename}")
     # except Exception as e:
     #     print(f"\nError saving prompt to file: {e}")
+
 
 if __name__ == "__main__":
     main()

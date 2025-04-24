@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, PretrainedConfig
 
+from src.tokenizer import get_tokenizer
+
 
 class EditLMHF(nn.Module):
     """
@@ -19,21 +21,19 @@ class EditLMHF(nn.Module):
     def __init__(self,
                  base_model: str = "Qwen/Qwen2.5-0.5B",
                  index_loss_weight: float = 1.0,
-                 freeze_shared_attn: bool = False,
-                 tokenizer=None):  # Option to freeze shared weights
+                 freeze_shared_attn: bool = False):  # Option to freeze shared weights
         super().__init__()
 
         self.backbone = AutoModelForCausalLM.from_pretrained(
             base_model,
             low_cpu_mem_usage=True,
         )
+        self.tokenizer = get_tokenizer(base_model, use_fast=True)
         self.backbone.requires_grad_(True)
 
         # Basic attributes
         config = self.backbone.config
         self.vocab_size = config.vocab_size
-        if tokenizer is not None:
-            self.vocab_size = tokenizer.vocab_size
         self.hidden_size = config.hidden_size
         self.index_loss_weight = index_loss_weight
 
