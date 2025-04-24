@@ -23,6 +23,8 @@ EXCLUDE_FILES = {
     'assemble.py',
     'disassemble.py',
     'response.txt',
+    'evaluate.py',
+    'inference.py',
     'test_tokenization.py',
     # 添加其他你想要排除的文件
 }
