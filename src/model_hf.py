@@ -17,9 +17,10 @@ class EditLMHF(nn.Module):
     """
 
     def __init__(self,
-                 base_model: str = "facebook/opt-125m",
+                 base_model: str = "Qwen/Qwen2.5-0.5B",
                  index_loss_weight: float = 1.0,
-                 freeze_shared_attn: bool = False):  # Option to freeze shared weights
+                 freeze_shared_attn: bool = False,
+                 tokenizer=None):  # Option to freeze shared weights
         super().__init__()
 
         self.backbone = AutoModelForCausalLM.from_pretrained(
@@ -31,6 +32,8 @@ class EditLMHF(nn.Module):
         # Basic attributes
         config = self.backbone.config
         self.vocab_size = config.vocab_size
+        if tokenizer is not None:
+            self.vocab_size = tokenizer.vocab_size
         self.hidden_size = config.hidden_size
         self.index_loss_weight = index_loss_weight
 

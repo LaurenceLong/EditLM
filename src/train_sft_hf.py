@@ -203,10 +203,11 @@ def main():
             start_step = 0
 
     if model is None:  # If not loaded from checkpoint or loading failed
-        model = EditLMHF(base_model=args.base, index_loss_weight=1.0).to(device)
         # Load tokenizer fresh
         print("加载新的 Tokenizer...")
         tokenizer = get_tokenizer(args.base, use_fast=True)
+
+        model = EditLMHF(base_model=args.base, index_loss_weight=1.0, tokenizer=tokenizer).to(device)
         num_added_toks = NUM_ADDED_TOKENS[0]
 
         # Resize embeddings if new tokens were added
