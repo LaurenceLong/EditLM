@@ -7,7 +7,7 @@ def get_tokenizer(base, **kwargs):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     # 获取 <|delete_token_id|>标记的ID
-    del_token_id = tokenizer.pad_token(tokenizer.pad_token)
+    del_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
     print(f" <|delete_token_id|>标记的ID为: {del_token_id}")
     return tokenizer
 
