@@ -207,7 +207,7 @@ def main():
         print("加载新的 Tokenizer...")
         tokenizer = get_tokenizer(args.base, use_fast=True)
 
-        model = EditLMHF(base_model=args.base, index_loss_weight=1.0, tokenizer=tokenizer).to(device)
+        model = EditLMHF(base_model=args.base, index_loss_weight=1.0).to(device)
     del_token_id = get_del_token_id(tokenizer)
 
     # --- Optimizer and Scheduler ---
