@@ -41,7 +41,6 @@ class DeletionTaskDataset(Dataset):
         """加载指定索引的数据块"""
         actual_chunk_idx = self.chunk_order[chunk_idx % self.num_chunks]
         path = os.path.join(self.data_dir, f"{self.split}_deletion_chunk_{actual_chunk_idx}.pt")
-        print(f"加载删除任务数据块 {actual_chunk_idx}/{self.num_chunks - 1}...")
         return torch.load(path)
 
     def __len__(self):
@@ -103,7 +102,6 @@ class InsertionTaskDataset(Dataset):
         """加载指定索引的数据块"""
         actual_chunk_idx = self.chunk_order[chunk_idx % self.num_chunks]
         path = os.path.join(self.data_dir, f"{self.split}_insertion_chunk_{actual_chunk_idx}.pt")
-        print(f"加载插入任务数据块 {actual_chunk_idx}/{self.num_chunks - 1}...")
         return torch.load(path)
 
     def __len__(self):
@@ -163,7 +161,6 @@ class PredictionTaskDataset(Dataset):
         """加载指定索引的数据块"""
         actual_chunk_idx = self.chunk_order[chunk_idx % self.num_chunks]
         path = os.path.join(self.data_dir, f"{self.split}_prediction_chunk_{actual_chunk_idx}.pt")
-        print(f"加载预测任务数据块 {actual_chunk_idx}/{self.num_chunks - 1}...")
         return torch.load(path)
 
     def __len__(self):
