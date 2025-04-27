@@ -56,9 +56,6 @@ class EditLMHF(nn.Module):
         self.index_head = nn.Linear(self.hidden_size, 1, bias=False)  # Predicts edit position
         self.edit_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)  # Predicts edited token
 
-        # Share weights with input embeddings
-        self._share_embedding_weights()
-
     def _find_and_share_attn_projections(self, config: PretrainedConfig, freeze: bool):
         """
         Find and share attention projection layers from the backbone's last layer.
@@ -219,17 +216,9 @@ class EditLMHF(nn.Module):
                 f"Successfully shared attention projections (Query Heads: {self.num_heads}, KV Heads: {self.num_kv_heads}).")
             if freeze:
                 for proj in [self.q_proj, self.k_proj, self.v_proj, self.o_proj]:
-                    if proj: proj.requires_grad_(False)
+                    if proj:
+                        proj.requires_grad_(False)
                 print("Attention projections frozen.")
-
-    def _share_embedding_weights(self):
-        """Share weights between edit_head and input embeddings."""
-        try:
-            input_embeddings = self.backbone.get_input_embeddings()
-            self.edit_head.weight = input_embeddings.weight
-            print("Successfully shared weights between edit_head and input embeddings.")
-        except AttributeError:
-            warnings.warn("Could not share edit_head and input embedding weights.")
 
     def _build_gap_state(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
@@ -262,8 +251,7 @@ class EditLMHF(nn.Module):
         # --- MODIFIED: Check for num_kv_heads as well ---
         if not all([self.q_proj, self.k_proj, self.v_proj, self.o_proj, self.num_heads, self.num_kv_heads]):
             # Fall back to zeros if global context unavailable
-            warnings.warn("Global context disabled due to missing projections or head counts.", RuntimeWarning)
-            global_ctx = torch.zeros_like(gap_local)
+            raise RuntimeError("Global context disabled due to missing projections or head counts.")
         else:
             # --- MODIFIED: GQA/MQA Handling ---
             if hidden_dim % self.num_heads != 0:
@@ -384,28 +372,39 @@ class EditLMHF(nn.Module):
         # 2. Build gap representations with fused local and global context
         fused_gap_state = self._build_gap_state(hidden_states)  # [B, L+1, D]
 
-        # 3. Compute edit position and token logits
-        idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
-        edit_logits_all = self.edit_head(fused_gap_state)  # [B, L+1, V]
-
-        # 4. Inference or training logic
+        # 3. Inference or training logic
         if target_index is None:
             # === Inference mode ===
+            # ... (计算 fused_gap_state 和 idx_logits 的部分不变) ...
+            idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
+
+            # 1. 预测编辑位置
             pred_index = idx_logits.argmax(-1)  # [B]
 
-            # gather edit logits at predicted index
-            gathered_edit = torch.gather(
-                edit_logits_all,  # [B, L+1, V]
-                dim=1,
-                index=pred_index.view(-1, 1, 1).expand(-1, 1, self.vocab_size)  # [B,1,V]
-            ).squeeze(1)  # [B, V]
-
-            # 对应句末插入时，用 backbone LM logits 的最后一个 token
+            # 2. 准备 lm_head 的输出 (备用)
             lm_last_token = lm_logits[:, seq_len - 1, :]  # [B, V]
-            # 使用torch.eq确保生成张量而非布尔标量
-            use_lm_mask = torch.eq(pred_index, seq_len).unsqueeze(-1).expand(-1, self.vocab_size)  # [B,V]
 
-            final_token_logits = torch.where(use_lm_mask, lm_last_token, gathered_edit)
+            # 3. 创建掩码，判断是否使用 lm_head
+            #    注意：这里掩码只需要 [B] 的形状，后面再扩展
+            use_lm_mask_scalar = torch.eq(pred_index, seq_len)  # [B]
+
+            # 4. Gather *需要*计算 edit_head 的 fused_gap_state
+            # Gather the specific gap state corresponding to pred_index
+            gathered_gap_state = torch.gather(
+                fused_gap_state,  # [B, L+1, D]
+                dim=1,
+                index=pred_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)  # [B, 1, D] index
+            ).squeeze(1)  # [B, D]
+
+            # Calculate edit_head *only* for the gathered state
+            gathered_edit = self.edit_head(gathered_gap_state)  # [B, V]
+
+            # 5. 使用 torch.where 结合 lm_last_token 和 gathered_edit
+            final_token_logits = torch.where(
+                use_lm_mask_scalar.unsqueeze(-1),  # [B, 1] -> 扩展到 [B, V]
+                lm_last_token,  # [B, V]
+                gathered_edit  # [B, V]
+            )
 
             return dict(
                 index_logits=idx_logits,
@@ -415,19 +414,32 @@ class EditLMHF(nn.Module):
 
         else:
             # === Training mode ===
-            # gather edit logits at target_index
-            gathered_edit = torch.gather(
-                edit_logits_all,  # [B, L+1, V]
-                dim=1,
-                index=target_index.view(-1, 1, 1).expand(-1, 1, self.vocab_size)
-            ).squeeze(1)  # [B, V]
+            idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
 
+            # 1. 准备 lm_head 的输出 (备用)
             lm_last_token = lm_logits[:, seq_len - 1, :]  # [B, V]
-            # 使用torch.eq确保生成张量而非布尔标量
-            use_lm_mask = torch.eq(target_index, seq_len).unsqueeze(-1).expand(-1, self.vocab_size)  # [B,V]
 
-            tok_logits_for_loss = torch.where(use_lm_mask, lm_last_token, gathered_edit)  # [B,V]
+            # 2. 创建掩码，判断是否使用 lm_head
+            use_lm_mask_scalar = torch.eq(target_index, seq_len)  # [B]
 
+            # 3. Gather the specific gap state corresponding to target_index
+            gathered_gap_state = torch.gather(
+                fused_gap_state,  # [B, L+1, D]
+                dim=1,
+                index=target_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)  # [B, 1, D] index
+            ).squeeze(1)  # [B, D]
+
+            # 4. Calculate edit_head *only* for the gathered state
+            gathered_edit = self.edit_head(gathered_gap_state)  # [B, V]
+
+            # 5. 使用 torch.where 结合 lm_last_token 和 gathered_edit
+            tok_logits_for_loss = torch.where(
+                use_lm_mask_scalar.unsqueeze(-1),  # [B, 1] -> 扩展到 [B, V]
+                lm_last_token,  # [B, V]
+                gathered_edit  # [B, V]
+            )
+
+            # 6. 计算 Loss (不变)
             tok_loss = F.cross_entropy(tok_logits_for_loss, target_token)
             idx_loss = F.cross_entropy(idx_logits, target_index)
             loss = tok_loss + self.index_loss_weight * idx_loss

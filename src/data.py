@@ -1,14 +1,84 @@
 import os
-import random
-
-import torch
-import tqdm
-from datasets import load_dataset
-from torch.utils.data import Dataset, DataLoader
-
-from config import TrainConfig
 
 WP = os.path.expanduser("~/.cache/editlm")
+
+# src/data.py (or wherever your datasets are defined)
+import os
+import torch
+from torch.utils.data import Dataset
+import random
+
+
+# --- Assume DeletionTaskDataset and InsertionTaskDataset are here ---
+# class DeletionTaskDataset(Dataset): ...
+# class InsertionTaskDataset(Dataset): ...
+
+class PredictionTaskDataset(Dataset):
+    """
+    Dataset for the prediction/append task (target_index == seq_len).
+    Uses the precomputed sequences from *_prediction_inputs.pt.
+    The goal is to predict the last token of the sequence, given the
+    preceding seq_len-1 tokens, by setting target_index to seq_len.
+    """
+
+    def __init__(self, data_dir: str, split: str, seq_len: int, shuffle: bool = True):
+        """
+        Args:
+            data_dir: Directory containing the preprocessed data.
+            split: Data split ('train', 'validation', 'test').
+            seq_len: The sequence length used during preprocessing.
+            shuffle: Whether to shuffle the data samples.
+        """
+        self.data_dir = data_dir
+        self.split = split
+        self.seq_len = seq_len
+        self.shuffle = shuffle
+
+        prediction_file = os.path.join(self.data_dir, f"{self.split}_prediction_inputs.pt")
+        if not os.path.exists(prediction_file):
+            raise FileNotFoundError(f"Prediction data file not found: {prediction_file}")
+
+        print(f"Loading prediction data from: {prediction_file}")
+        # Load the entire tensor of sequences
+        self.all_sequences = torch.load(prediction_file, map_location='cpu')  # Load to CPU first
+        self.num_sequences = len(self.all_sequences)
+        print(f"Loaded {self.num_sequences} sequences for prediction task ({self.split} split).")
+
+        self.indices = list(range(self.num_sequences))
+        if self.shuffle:
+            random.shuffle(self.indices)
+
+    def __len__(self):
+        return self.num_sequences
+
+    def __getitem__(self, idx):
+        """
+        Returns a dictionary containing:
+        - sequences: The input sequence [L].
+        - indices: The target index, always seq_len [scalar].
+        - tokens: The target token (the last token of the sequence) [scalar].
+        """
+        actual_idx = self.indices[idx]
+        sequence = self.all_sequences[actual_idx]  # [L]
+
+        # Target index is always seq_len for this task
+        target_index = torch.tensor(self.seq_len, dtype=torch.long)
+
+        # Target token is the last token of the input sequence
+        # The model learns P(token_L | token_1, ..., token_{L-1})
+        # when index = L
+        target_token = sequence[-1].clone().detach()  # Ensure it's a scalar tensor
+
+        return {
+            'sequences': sequence.long(),  # Ensure correct dtype
+            'indices': target_index,
+            'tokens': target_token.long()  # Ensure correct dtype
+        }
+
+    def reshuffle(self):
+        """Reshuffles the indices if shuffle is enabled."""
+        if self.shuffle:
+            random.shuffle(self.indices)
 
 
 # 删除任务数据集
@@ -147,27 +217,3 @@ def collate_fn(batch):
         'indices': indices,
         'tokens': tokens
     }
-
-
-class WikiDataset(Dataset):
-    def __init__(self, split: str, cfg: TrainConfig, tokenizer=None):
-        self.ids = []
-        ds = load_dataset("wikitext", "wikitext-103-v1", split=split)
-        for line in tqdm.tqdm(ds["text"], desc="tokenizing"):
-            ids = tokenizer.encode(line, return_tensors="pt")
-            if len(ids) == 0:
-                continue
-            # chunk
-            for i in range(0, len(ids) - cfg.seq_len, cfg.seq_len):
-                self.ids.append(torch.tensor(ids[i:i + cfg.seq_len]))
-
-    def __len__(self):
-        return len(self.ids)
-
-    def __getitem__(self, i):
-        return self.ids[i]
-
-
-def get_loader(split: str, cfg: TrainConfig):
-    ds = WikiDataset(split, cfg)
-    return DataLoader(ds, batch_size=cfg.batch_size, shuffle=True, drop_last=True)
