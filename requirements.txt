@@ -5,3 +5,4 @@ accelerate
 tqdm>=4.66.4
 numpy>=1.26.4
 termcolor>=2.4.0
+wandb>=0.19.6

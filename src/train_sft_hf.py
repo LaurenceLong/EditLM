@@ -1,5 +1,6 @@
 # src/train_sft_hf.py
 import argparse
+import glob
 import os
 import warnings
 import math
@@ -9,6 +10,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 import random
 from termcolor import colored
+import wandb  # 导入 wandb，用于实时监控
 
 # 确保导入所有必要的组件
 from data import (
@@ -80,16 +82,14 @@ def set_trainable_parts(model: EditLMHF, phase: str, freeze_backbone=True):
                         print(f"已解冻 {component_name} ({unfrozen_count - count_before} 参数)")
 
         # 添加单独处理的Parameter计数
-        if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed,
-                                                            nn.Parameter) and model.gap_token_embed.requires_grad:
+        if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter) and model.gap_token_embed.requires_grad:
             unfrozen_count += model.gap_token_embed.numel()
-        if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed,
-                                                           nn.Parameter) and model.boundary_embed.requires_grad:
+        if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed, nn.Parameter) and model.boundary_embed.requires_grad:
             unfrozen_count += model.boundary_embed.numel()
     else:
         warnings.warn(f"未知的训练阶段 '{phase}'，没有设置可训练参数。")
 
-    # 输出最终的可训练参数数量
+    # 输出最后的可训练参数数量
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(colored(
@@ -108,7 +108,8 @@ def get_next_batch(loader_iter, loader, task_type, step):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="使用交替的删除、插入和预测任务训练EditLM")
+        description="使用交替的删除、插入和预测任务训练EditLM"
+    )
     ap.add_argument("--outdir", required=True, help="模型保存目录")
     ap.add_argument("--base", default="Qwen/Qwen2.5-0.5B",
                     help="HF checkpoint，例如 Qwen/Qwen2.5-0.5B")
@@ -125,7 +126,15 @@ def main():
     ap.add_argument("--warmup_steps", type=int, default=1000, help="预热步数")
     ap.add_argument("--ckpt_every", type=int, default=5000, help="每多少步保存检查点")
     ap.add_argument("--seed", type=int, default=42, help="随机种子")
+    # 添加 wandb 参数
+    ap.add_argument("--wandb", action="store_true", help="是否启用 wandb 监控训练过程")
+    ap.add_argument("--wandb_project", type=str, default="EditLM", help="wandb 项目名称")
     args = ap.parse_args()
+
+    # 初始化 wandb
+    if args.wandb:
+        wandb.init(project=args.wandb_project, config=vars(args))
+        print(f"wandb 已初始化，项目名称：{args.wandb_project}")
 
     # 设置随机种子
     random.seed(args.seed)
@@ -188,8 +197,13 @@ def main():
     cfg.fp16 = cfg.fp16 and (device == "cuda")
     print(colored(f"使用设备: {device}, FP16: {cfg.fp16}", "cyan"))
 
+    if not args.base and not args.from_file:
+        raise RuntimeError("args.base和args.from_file均未指定")
+
     # 模型和Tokenizer加载
-    print(colored(f"加载模型: {args.base}", "cyan"))
+    if args.base:
+        print(colored(f"加载模型: {args.base}", "cyan"))
+
     tokenizer = None
     model = None
     start_step = 0
@@ -230,6 +244,10 @@ def main():
     sched = WarmupCosine(opt, cfg, cfg.total_steps)
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.fp16)
 
+    # 如果启用了 wandb，则监控模型
+    if args.wandb:
+        wandb.watch(model, log="all")
+
     # 加载优化器状态（如果从检查点恢复）
     if args.from_file and start_step > 0:
         try:
@@ -243,7 +261,12 @@ def main():
                     print(f"将调度器推进到步骤 {start_step}...")
                     sched.step_ = 0  # 重置内部步骤
                     # 正确推进调度器
-                    target_lr_ratio = min(start_step / cfg.warmup_steps, 0.5 * (1 + math.cos(math.pi * (start_step - cfg.warmup_steps) / (cfg.total_steps - cfg.warmup_steps)))) if start_step > cfg.warmup_steps else start_step / cfg.warmup_steps
+                    target_lr_ratio = (
+                        min(start_step / cfg.warmup_steps,
+                            0.5 * (1 + math.cos(math.pi * (start_step - cfg.warmup_steps) / (cfg.total_steps - cfg.warmup_steps))))
+                        if start_step > cfg.warmup_steps
+                        else start_step / cfg.warmup_steps
+                    )
                     target_lr_ratio = max(0, target_lr_ratio)  # 确保比率非负
 
                     # 设置当前步骤并更新优化器中的学习率
@@ -389,7 +412,15 @@ def main():
             sched.step()
             opt.zero_grad(set_to_none=True)  # 使用set_to_none=True减少内存占用
 
-        # 日志记录和检查点保存
+            # wandb记录指标（loss、lr与当前步数）
+            if args.wandb:
+                wandb.log({
+                    "loss": loss.item() * grad_accum_steps,
+                    "learning_rate": opt.param_groups[0]['lr'],
+                    "step": step
+                }, step=step)
+
+        # 日志记录
         pbar.set_postfix(
             task=task_type,
             loss=f"{loss.item() * grad_accum_steps:.3f}",  # 记录未归一化的损失
@@ -398,16 +429,31 @@ def main():
             lr=f"{opt.param_groups[0]['lr']:.2e}"
         )
 
-        # 保存检查点
+        # 保存检查点：先删除旧的同类型检查点文件，再保存当前检查点
         if step % cfg.ckpt_every == 0 and step > 0:
+            # 删除旧的 step 检查点文件
+            step_pattern = os.path.join(args.outdir, "sft_step*.pt")
+            old_step_ckpts = glob.glob(step_pattern)
+            for old_ckpt in old_step_ckpts:
+                os.remove(old_ckpt)
+                print(colored(f"删除旧的检查点文件: {old_ckpt}", "yellow"))
             ckpt_path = f"{args.outdir}/sft_step{step}.pt"
             save_ckpt(model, opt, step, ckpt_path, tokenizer=tokenizer)
             print(colored(f"在步骤 {step} 保存检查点: {ckpt_path}", "green"))
 
-    # 保存最终模型
+    # 保存最终模型：先删除旧的最终检查点文件
     final_ckpt_path = f"{args.outdir}/sft_final_{cfg.total_steps}.pt"
+    final_pattern = os.path.join(args.outdir, "sft_final*.pt")
+    old_final_ckpts = glob.glob(final_pattern)
+    for old_ckpt in old_final_ckpts:
+        os.remove(old_ckpt)
+        print(colored(f"删除旧的最终检查点文件: {old_ckpt}", "yellow"))
     save_ckpt(model, opt, cfg.total_steps, final_ckpt_path, tokenizer=tokenizer)
     print(colored(f"\n训练完成。最终模型保存到: {final_ckpt_path}", "green"))
+
+    # 结束 wandb 运行
+    if args.wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
