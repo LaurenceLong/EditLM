@@ -15,7 +15,7 @@ import torch
 from datasets import load_dataset
 from tqdm import tqdm
 
-from tokenizer import get_tokenizer
+from tokenizer import get_tokenizer, get_del_token_id
 
 
 def main():
@@ -101,105 +101,99 @@ def main():
         # 随机采样序列
         sample_indices = np.random.choice(total_original_sequences, sample_size, replace=False)
         sampled_sequences = original_sequences[sample_indices]
-
-        # 处理每个采样的序列，直接生成编辑任务数据并保存
-        for seq_idx in tqdm(range(len(sampled_sequences)), desc=f"创建任务数据"):
-            original_seq = sampled_sequences[seq_idx].tolist()
-
-            # 预测任务 - 为序列中的每个位置生成预测样本
+        # ============================================================================
+        # 为每个采样序列生成任务数据（修复版：每种编辑任务只产生 1 个缺陷样本）
+        # ============================================================================
+        for seq_idx in tqdm(range(len(sampled_sequences)), desc="创建任务数据"):
+            # ---------- 共有预处理 ----------
+            original_seq = sampled_sequences[seq_idx].tolist()  # list[int]
             seq_len = len(original_seq)
-            if seq_len <= 1:
+            if seq_len <= 1:  # 极短文本跳过
                 continue
+
+            # -----------------------------------------------------------------------
+            # 1) 预测任务 (与旧实现一致，可一次生成多个样本)
+            # -----------------------------------------------------------------------
             num_to_predict = max(1, int(seq_len * args.prediction_ratio))
-            predict_positions = sorted(random.sample(range(1, args.seq_len - 1), num_to_predict))
+            predict_positions = sorted(random.sample(range(1, seq_len - 1), num_to_predict))
 
             for pos in predict_positions:
-                # 位置是当前token，预测的是下一个token
-                next_token = original_seq[pos + 1]
-
+                next_token = original_seq[pos + 1]  # 目标 token
                 prediction_buffer.append({
-                    'sequence': torch.tensor(original_seq[:pos + 1]),  # 包含当前位置
-                    'index': torch.tensor(pos + 1),  # 预测下一个位置
-                    'token': torch.tensor(next_token)  # 目标token
+                    "sequence": torch.tensor(original_seq[:pos + 1]),
+                    "index": torch.tensor(pos + 1),
+                    "token": torch.tensor(next_token)
                 })
                 total_prediction_samples += 1
-
-                # 当缓冲区达到指定大小时，保存并清空
                 if len(prediction_buffer) >= args.chunk_size:
-                    _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx, tokenizer.pad_token_id)
+                    _save_prediction_chunk(
+                        prediction_buffer, prediction_dir,
+                        split, prediction_chunk_idx, tokenizer.pad_token_id
+                    )
                     prediction_chunk_idx += 1
                     prediction_buffer = []
 
-            # 删除任务 - 在序列中随机插入token供模型删除
-            modified_seq = original_seq.copy()
-            seq_len = len(modified_seq)
+            # -----------------------------------------------------------------------
+            # 2) 删除任务 —— 只插入 1 个随机 token
+            # -----------------------------------------------------------------------
+            # 计算删除任务的token数量（至少1个）
+            num_to_delete = max(1, int(seq_len * args.deletion_ratio))
+            to_delete_positions = sorted(random.sample(range(seq_len), num_to_delete))
 
-            # 计算要插入的token数量（至少1个）
-            num_to_insert = max(1, int(seq_len * args.deletion_ratio))
-
-            # 随机选择插入位置和要插入的token
-            insert_positions = sorted(random.sample(range(seq_len), num_to_insert))
-
-            # 从后向前插入，避免位置偏移
-            for pos in reversed(insert_positions):
+            for to_delete_pos in to_delete_positions:
+                del_seq = original_seq.copy()
                 random_token = random.randint(0, vocab_size - 1)
-                modified_seq.insert(pos, random_token)
-
-            # 截断保持序列长度不变
-            modified_seq = modified_seq[:args.seq_len]
-
-            # 将每个插入位置单独添加为一个训练样本
-            for pos in insert_positions:
-                if pos < args.seq_len:  # 确保目标位置在序列范围内
+    
+                del_seq.insert(to_delete_pos, random_token)  # 执行插入
+                if len(del_seq) > args.seq_len:  # 可能超长, 截断
+                    del_seq = del_seq[:args.seq_len]
+    
+                # 若截断导致缺陷 token 被裁掉，则跳过该样本
+                if to_delete_pos < len(del_seq):
                     deletion_buffer.append({
-                        'sequence': torch.tensor(modified_seq),
-                        'index': torch.tensor(pos),
-                        'token': torch.tensor(0)  # 对于删除任务，我们添加一个占位符token
+                        "sequence": torch.tensor(del_seq),
+                        "index": torch.tensor(to_delete_pos),
+                        "token": torch.tensor(get_del_token_id(tokenizer))  # 0 仅作占位
                     })
                     total_deletion_samples += 1
-
-                    # 当缓冲区达到指定大小时，保存并清空
                     if len(deletion_buffer) >= args.chunk_size:
-                        _save_deletion_chunk(deletion_buffer, deletion_dir, split, deletion_chunk_idx)
+                        _save_deletion_chunk(
+                            deletion_buffer, deletion_dir,
+                            split, deletion_chunk_idx
+                        )
                         deletion_chunk_idx += 1
                         deletion_buffer = []
 
-            # 插入任务 - 从序列中随机删除token供模型插入
-            modified_seq = original_seq.copy()
-            seq_len = len(modified_seq)
+            # -----------------------------------------------------------------------
+            # 3) 插入任务 —— 只删除 1 个随机 token
+            # -----------------------------------------------------------------------
+            # 计算插入任务的token数量（至少1个）
+            num_to_insert = max(1, int(seq_len * args.insertion_ratio))
+            to_insert_positions = sorted(random.sample(range(seq_len), num_to_insert))
+            for to_insert_pos in to_insert_positions:
+                to_insert_token = original_seq[to_insert_pos]
 
-            # 计算要删除的token数量（至少1个）
-            num_to_delete = max(1, int(seq_len * args.insertion_ratio))
+                ins_seq = original_seq.copy()
+                ins_seq.pop(to_insert_pos)  # 执行删除
 
-            # 随机选择删除位置
-            delete_positions = sorted(random.sample(range(seq_len), num_to_delete))
-
-            # 保存每个要删除的位置和token
-            delete_tokens = [modified_seq[pos] for pos in delete_positions]
-
-            # 从后向前删除，避免位置偏移
-            for i, pos in enumerate(reversed(delete_positions)):
-                original_pos = delete_positions[len(delete_positions) - i - 1]
-                modified_seq.pop(pos)
-
-            # 将每个删除位置单独添加为一个训练样本
-            for pos, token in zip(delete_positions, delete_tokens):
                 insertion_buffer.append({
-                    'sequence': torch.tensor(modified_seq),
-                    'index': torch.tensor(pos),
-                    'token': torch.tensor(token)
+                    "sequence": torch.tensor(ins_seq),
+                    "index": torch.tensor(to_insert_pos),
+                    "token": torch.tensor(to_insert_token)
                 })
                 total_insertion_samples += 1
-
-                # 当缓冲区达到指定大小时，保存并清空
                 if len(insertion_buffer) >= args.chunk_size:
-                    _save_insertion_chunk(insertion_buffer, insertion_dir, split, insertion_chunk_idx, tokenizer.pad_token_id)
+                    _save_insertion_chunk(
+                        insertion_buffer, insertion_dir,
+                        split, insertion_chunk_idx, tokenizer.pad_token_id
+                    )
                     insertion_chunk_idx += 1
                     insertion_buffer = []
 
         # 保存最后的缓冲区数据
         if prediction_buffer:
-            _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx, tokenizer.pad_token_id)
+            _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx,
+                                   tokenizer.pad_token_id)
             prediction_chunk_idx += 1
 
         if deletion_buffer:
