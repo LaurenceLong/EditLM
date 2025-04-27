@@ -55,8 +55,21 @@ class EditLMHF(nn.Module):
         # Output heads
         self.index_head = nn.Linear(self.hidden_size, 1, bias=False)  # Predicts edit position
         self.edit_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)  # Predicts edited token
-        self.edit_head.weight.data.copy_(self.backbone.lm_head.weight.data)
-        self.edit_head.bias.data.copy_(self.backbone.lm_head.bias.data)
+        # --- Initialize edit_head with lm_head weights ---
+        lm_head = self.backbone.get_lm_head()  # Use PEFT's helper method
+        if lm_head is not None:
+            print("Initializing edit_head with lm_head weights...")
+            self.edit_head.weight.data.copy_(lm_head.weight.data)
+            # Handle bias if lm_head has it (many don't)
+            if hasattr(lm_head, 'bias') and lm_head.bias is not None:
+                if hasattr(self.edit_head, 'bias') and self.edit_head.bias is not None:
+                    self.edit_head.bias.data.copy_(lm_head.bias.data)
+                    print("Copied lm_head bias to edit_head.")
+                else:
+                    print("Warning: lm_head has bias, but edit_head does not. Bias not copied.")
+            print("edit_head initialized.")
+        else:
+            print("Warning: Could not find lm_head in the backbone. edit_head remains randomly initialized.")
 
     def _find_and_share_attn_projections(self, config: PretrainedConfig, freeze: bool):
         """
