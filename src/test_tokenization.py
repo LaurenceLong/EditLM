@@ -10,7 +10,7 @@ import torch
 from termcolor import colored
 
 from tokenizer import get_tokenizer, get_del_token_id
-from data import DeletionTaskDataset, InsertionTaskDataset
+from data import DeletionTaskDataset, InsertionTaskDataset, PredictionTaskDataset
 
 
 def main():
@@ -35,44 +35,8 @@ def main():
     print(f"序列长度: \n{seq_len}")
     print("="*80 + "\n")
 
-    # 测试任务1：预测任务
-    print("\n=== 测试任务1：预测任务 ===\n")
-    try:
-        # 加载预测任务数据
-        prediction_data_path = os.path.join(args.data_dir, "train_prediction_inputs.pt")
-        if os.path.exists(prediction_data_path):
-            prediction_data = torch.load(prediction_data_path)
-            print(f"成功加载预测任务数据，总计 {len(prediction_data)} 个样本")
-
-            # 随机选择几个样本进行展示
-            indices = np.random.choice(len(prediction_data), min(args.num_samples, len(prediction_data)), replace=False)
-
-            for i, idx in enumerate(indices):
-                sample = prediction_data[idx]
-
-                # 显示为文本
-                text = tokenizer.decode(sample)
-                target_token = sample[-1].item()
-                target_token_text = tokenizer.decode([target_token])
-
-                print(f"\n样本 {i+1}:")
-                print(f"输入序列: \n{text[:1024]}..." if len(text) > 1024 else f"输入序列: \n{text}")
-                print(f"预测目标: 位置 = {seq_len}, Token = {target_token} ('{target_token_text}')")
-
-                # 验证：模拟预测任务
-                print("验证 - 任务：预测序列结尾的下一个token")
-
-                # 完成预测任务应该产生的结果
-                prediction_result = sample[-1]
-                print(f"期望模型输出: 在位置 {seq_len} 处预测 token {prediction_result} ('{tokenizer.decode([prediction_result])}')")
-        else:
-            print(f"警告：预测任务数据文件 {prediction_data_path} 不存在")
-    except Exception as e:
-        print(f"测试预测任务时发生错误: \n{e}")
-        traceback.print_exc()
-
-    # 测试任务2：删除任务
-    print("\n=== 测试任务2：删除任务 ===\n")
+    # 测试任务1：删除任务
+    print("\n=== 测试任务1：删除任务 ===\n")
     try:
         # 创建删除任务数据集
         deletion_dir = os.path.join(args.data_dir, "deletion")
@@ -123,8 +87,8 @@ def main():
         print(f"测试删除任务时发生错误: \n{e}")
         traceback.print_exc()
 
-    # 测试任务3：插入任务
-    print("\n=== 测试任务3：插入任务 ===\n")
+    # 测试任务2：插入任务
+    print("\n=== 测试任务2：插入任务 ===\n")
     try:
         # 创建插入任务数据集
         insertion_dir = os.path.join(args.data_dir, "insertion")
@@ -175,6 +139,62 @@ def main():
     except Exception as e:
         print(f"测试插入任务时发生错误: \n{e}")
         traceback.print_exc()
+
+        # 测试任务3：预测任务
+        print("\n=== 测试任务3：预测任务 ===\n")
+        try:
+            # 创建预测任务数据集
+            prediction_dir = os.path.join(args.data_dir, "prediction")
+            prediction_dataset = PredictionTaskDataset(prediction_dir, "train", shuffle=False)
+            print(f"成功创建预测任务数据集")
+
+            # 加载几个样本
+            for i in range(min(args.num_samples, len(prediction_dataset))):
+                sample = prediction_dataset[i]
+
+                sequence = sample['sequence']
+                target_index = sample['index'].item()
+                target_token = sample['token'].item()
+
+                # 显示为文本
+                text = tokenizer.decode(sequence)
+                target_token_text = tokenizer.decode([target_token])
+
+                print(f"\n样本 {i + 1}:")
+                print(f"输入序列: \n{text[:1024]}..." if len(text) > 1024 else f"输入序列: \n{text}")
+                print(f"预测目标: 位置 = {target_index}, Token = {target_token} ('{target_token_text}')")
+
+                # 验证：执行预测操作，恢复原始序列
+                print("验证 - 任务：在序列中的指定位置预测特定token")
+
+                # 创建带颜色标记的序列，突出显示要预测的位置
+                tokens_list = sequence.tolist()
+                colored_text = ""
+                for j, token in enumerate(tokens_list):
+                    if j == target_index:
+                        # 在预测位置标记
+                        token_text = tokenizer.decode([token])
+                        colored_text += f"[GREEN]^[/GREEN]{token_text}"
+                    else:
+                        token_text = tokenizer.decode([token])
+                        colored_text += token_text
+
+                # 执行预测操作
+                modified_tokens = tokens_list.copy()
+                modified_tokens.insert(target_index, target_token)
+                # 为了保持长度一致，删除最后一个token（通常是填充token）
+                modified_tokens = modified_tokens[:-1]
+                modified_text = tokenizer.decode(modified_tokens)
+
+                print(
+                    f"输入序列（标记预测位置）: \n{colored_text[:1024].replace('[GREEN]', colored('', 'green', attrs=['bold'])).replace('[/GREEN]', '')}..." if len(
+                        colored_text) > 1024 else f"输入序列（标记预测位置）: \n{colored_text.replace('[GREEN]', colored('', 'green', attrs=['bold'])).replace('[/GREEN]', '')}")
+                print(f"执行预测后的序列: \n{modified_text[:1024]}..." if len(
+                    modified_text) > 1024 else f"执行预测后的序列: \n{modified_text}")
+                print(f"预测的token: '{target_token_text}'")
+        except Exception as e:
+            print(f"测试预测任务时发生错误: \n{e}")
+            traceback.print_exc()
 
     print("\n=== 测试完成 ===\n")
 

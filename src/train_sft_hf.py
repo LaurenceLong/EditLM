@@ -278,7 +278,7 @@ def main():
         # 如果不跳过预测任务
         if not cfg.skip_prediction:
             print("加载预测任务数据集...")
-            prediction_dataset = PredictionTaskDataset(prediction_dir, "train", cfg.seq_len, shuffle=True)
+            prediction_dataset = PredictionTaskDataset(prediction_dir, "train", shuffle=True)
             task_datasets["prediction"] = prediction_dataset
             task_loaders["prediction"] = DataLoader(
                 prediction_dataset, batch_size=cfg.batch_size, shuffle=True,
