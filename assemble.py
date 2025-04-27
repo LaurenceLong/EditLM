@@ -28,6 +28,7 @@ EXCLUDE_FILES = {
     'data.py',
     'evaluate.py',
     'inference.py',
+    'model_hf_bak.py',
     'preprocess_data.py',
     'test_hf_model.py',
     'test_tokenization.py',

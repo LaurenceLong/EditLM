@@ -3,7 +3,6 @@ from typing import Optional, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from termcolor import colored
 from transformers import AutoModelForCausalLM
 
 

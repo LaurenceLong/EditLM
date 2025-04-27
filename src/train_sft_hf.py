@@ -51,7 +51,8 @@ def set_trainable_parts(model: EditLMHF, phase: str, freeze_backbone=True):
         # 确保编辑相关的组件可训练
         trainable_components = [
             model.index_head, model.edit_head,
-            model.triple_proj, model.fuse_proj
+            model.gap_encoder
+            # model.triple_proj, model.fuse_proj
         ]
 
         # 处理可学习的embedding参数
