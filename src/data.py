@@ -193,14 +193,43 @@ class PredictionTaskDataset(Dataset):
         }
 
 
-def collate_fn(batch):
-    """将样本列表合并成批次"""
-    sequences = torch.stack([item['sequence'] for item in batch])
-    indices = torch.tensor([item['index'] for item in batch])
-    tokens = torch.stack([item['token'] for item in batch])
+def create_collate_fn(pad_token_id: int):
+    """
+    Creates a collate function that pads sequences and generates an attention mask.
 
-    return {
-        'sequences': sequences,
-        'indices': indices,
-        'tokens': tokens
-    }
+    Args:
+        pad_token_id: The ID of the padding token.
+
+    Returns:
+        A collate function suitable for DataLoader.
+    """
+
+    def collate_fn(batch):
+        """
+        Merges a list of samples into a batch, calculates attention mask.
+        Assumes all sequences in the batch *should* have the same length
+        after preprocessing (either naturally or via padding in preprocess).
+        If sequences within a batch can have variable lengths *before* collation,
+        this collate_fn needs padding logic. However, your current datasets
+        seem to load fixed-length sequences from chunks.
+        """
+        # Stack sequences, indices, and tokens as before
+        # Assuming sequences loaded from chunks are already padded/fixed length
+        sequences = torch.stack([item['sequence'] for item in batch])
+        # Use torch.stack for indices if they are tensors, otherwise torch.tensor
+        # Let's assume indices are scalar tensors from Dataset, stack them
+        indices = torch.stack([item['index'] for item in batch])
+        tokens = torch.stack([item['token'] for item in batch])  # Target tokens
+
+        # --- Generate Attention Mask ---
+        # Create mask where pad tokens are 0 and others are 1
+        attention_mask = (sequences != pad_token_id).long()  # Convert boolean to long (0 or 1)
+
+        return {
+            'sequences': sequences,
+            'attention_mask': attention_mask,  # Include the mask
+            'indices': indices,
+            'tokens': tokens
+        }
+
+    return collate_fn

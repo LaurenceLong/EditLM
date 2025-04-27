@@ -126,7 +126,7 @@ def main():
 
                 # 当缓冲区达到指定大小时，保存并清空
                 if len(prediction_buffer) >= args.chunk_size:
-                    _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx)
+                    _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx, tokenizer.pad_token_id)
                     prediction_chunk_idx += 1
                     prediction_buffer = []
 
@@ -182,10 +182,6 @@ def main():
                 original_pos = delete_positions[len(delete_positions) - i - 1]
                 modified_seq.pop(pos)
 
-            # 补齐保持序列长度不变
-            while len(modified_seq) < args.seq_len:
-                modified_seq.append(tokenizer.pad_token_id)
-
             # 将每个删除位置单独添加为一个训练样本
             for pos, token in zip(delete_positions, delete_tokens):
                 insertion_buffer.append({
@@ -197,13 +193,13 @@ def main():
 
                 # 当缓冲区达到指定大小时，保存并清空
                 if len(insertion_buffer) >= args.chunk_size:
-                    _save_insertion_chunk(insertion_buffer, insertion_dir, split, insertion_chunk_idx)
+                    _save_insertion_chunk(insertion_buffer, insertion_dir, split, insertion_chunk_idx, tokenizer.pad_token_id)
                     insertion_chunk_idx += 1
                     insertion_buffer = []
 
         # 保存最后的缓冲区数据
         if prediction_buffer:
-            _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx)
+            _save_prediction_chunk(prediction_buffer, prediction_dir, split, prediction_chunk_idx, tokenizer.pad_token_id)
             prediction_chunk_idx += 1
 
         if deletion_buffer:
@@ -211,7 +207,7 @@ def main():
             deletion_chunk_idx += 1
 
         if insertion_buffer:
-            _save_insertion_chunk(insertion_buffer, insertion_dir, split, insertion_chunk_idx)
+            _save_insertion_chunk(insertion_buffer, insertion_dir, split, insertion_chunk_idx, tokenizer.pad_token_id)
             insertion_chunk_idx += 1
 
         print(f"生成了 {total_prediction_samples} 个预测任务样本，保存为 {prediction_chunk_idx} 个数据块")
@@ -238,20 +234,18 @@ def main():
     print("预处理完成！")
 
 
-def _save_prediction_chunk(buffer, output_dir, split, chunk_idx):
+def _save_prediction_chunk(buffer, output_dir, split, chunk_idx, pad_token_id):  # 添加 pad_token_id 参数
     """辅助函数：保存预测任务数据块"""
-    # 将buffer中的数据转换为张量列表
     sequences = [item['sequence'] for item in buffer]
     indices = torch.stack([item['index'] for item in buffer])
     tokens = torch.stack([item['token'] for item in buffer])
 
-    # 对序列进行padding处理
     max_len = max(seq.size(0) for seq in sequences)
-    padded_sequences = torch.zeros((len(sequences), max_len), dtype=torch.long)
+    # 使用 pad_token_id 初始化，而不是 0
+    padded_sequences = torch.full((len(sequences), max_len), fill_value=pad_token_id, dtype=torch.long)
     for i, seq in enumerate(sequences):
         padded_sequences[i, :seq.size(0)] = seq
 
-    # 保存数据块
     data_chunk = {
         'sequences': padded_sequences,
         'indices': indices,
@@ -280,16 +274,22 @@ def _save_deletion_chunk(buffer, output_dir, split, chunk_idx):
     torch.save(data_chunk, output_path)
 
 
-def _save_insertion_chunk(buffer, output_dir, split, chunk_idx):
+def _save_insertion_chunk(buffer, output_dir, split, chunk_idx, pad_token_id):  # 添加 pad_token_id 参数
     """辅助函数：保存插入任务数据块"""
     # 将buffer中的数据转换为张量
-    sequences = torch.stack([item['sequence'] for item in buffer])
+    sequences = [item['sequence'] for item in buffer]
     indices = torch.stack([item['index'] for item in buffer])
     tokens = torch.stack([item['token'] for item in buffer])
 
+    max_len = max(seq.size(0) for seq in sequences)
+    # 使用 pad_token_id 初始化，而不是 0
+    padded_sequences = torch.full((len(sequences), max_len), fill_value=pad_token_id, dtype=torch.long)
+    for i, seq in enumerate(sequences):
+        padded_sequences[i, :seq.size(0)] = seq
+
     # 保存数据块
     data_chunk = {
-        'sequences': sequences,
+        'sequences': padded_sequences,
         'indices': indices,
         'tokens': tokens
     }

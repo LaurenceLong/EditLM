@@ -12,7 +12,7 @@ from termcolor import colored
 
 # 确保导入所有必要的组件
 from data import (
-    collate_fn,
+    create_collate_fn,
     DeletionTaskDataset,
     InsertionTaskDataset,
     PredictionTaskDataset
@@ -213,6 +213,8 @@ def main():
         model = EditLMHF(base_model=args.base, index_loss_weight=1.0).to(device)
 
     del_token_id = get_del_token_id(tokenizer)  # 用于DeletionTaskDataset
+    # --- Create the collate function ---
+    collate_fn_instance = create_collate_fn(pad_token_id=tokenizer.pad_token_id)
 
     # 优化器和调度器
     print(colored("创建优化器和调度器...", "cyan"))
@@ -282,7 +284,7 @@ def main():
             task_datasets["prediction"] = prediction_dataset
             task_loaders["prediction"] = DataLoader(
                 prediction_dataset, batch_size=cfg.batch_size, shuffle=True,
-                num_workers=2, pin_memory=True, collate_fn=collate_fn, drop_last=True
+                num_workers=2, pin_memory=True, collate_fn=collate_fn_instance, drop_last=True
             )
             task_iters["prediction"] = iter(task_loaders["prediction"])
 
@@ -292,7 +294,7 @@ def main():
         task_datasets["deletion"] = deletion_dataset
         task_loaders["deletion"] = DataLoader(
             deletion_dataset, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=2, pin_memory=True, collate_fn=collate_fn, drop_last=True
+            num_workers=2, pin_memory=True, collate_fn=collate_fn_instance, drop_last=True
         )
         task_iters["deletion"] = iter(task_loaders["deletion"])
 
@@ -301,7 +303,7 @@ def main():
         task_datasets["insertion"] = insertion_dataset
         task_loaders["insertion"] = DataLoader(
             insertion_dataset, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=2, pin_memory=True, collate_fn=collate_fn, drop_last=True
+            num_workers=2, pin_memory=True, collate_fn=collate_fn_instance, drop_last=True
         )
         task_iters["insertion"] = iter(task_loaders["insertion"])
 
@@ -354,12 +356,14 @@ def main():
         x = batch['sequences'].to(device)
         target_indices = batch['indices'].to(device)
         target_tokens = batch['tokens'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
 
         # 使用自动混合精度进行前向传播
         with torch.cuda.amp.autocast(enabled=cfg.fp16):
             # 前向传播，model内部会根据target_index决定使用lm_head还是edit_head逻辑
             out = model(
                 input_ids=x,
+                attention_mask=attention_mask,
                 target_index=target_indices,
                 target_token=target_tokens
             )
