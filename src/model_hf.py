@@ -56,7 +56,7 @@ class EditLMHF(nn.Module):
         self.index_head = nn.Linear(self.hidden_size, 1, bias=False)  # Predicts edit position
         self.edit_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)  # Predicts edited token
         # --- Initialize edit_head with lm_head weights ---
-        lm_head = self.backbone.get_lm_head()  # Use PEFT's helper method
+        lm_head = self.backbone.lm_head if hasattr(self.backbone, 'lm_head') else None
         if lm_head is not None:
             print("Initializing edit_head with lm_head weights...")
             self.edit_head.weight.data.copy_(lm_head.weight.data)
