@@ -39,9 +39,6 @@ def main():
     deletion_dir = os.path.join(args.output_dir, "deletion")
     insertion_dir = os.path.join(args.output_dir, "insertion")
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(prediction_dir, exist_ok=True)
-    os.makedirs(deletion_dir, exist_ok=True)
-    os.makedirs(insertion_dir, exist_ok=True)
 
     # 加载tokenizer
     print(f"加载tokenizer: {args.base}")
@@ -246,6 +243,8 @@ def _save_prediction_chunk(buffer, output_dir, split, chunk_idx, pad_token_id): 
         'tokens': tokens
     }
 
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{split}_prediction_chunk_{chunk_idx}.pt")
     torch.save(data_chunk, output_path)
 
@@ -264,6 +263,8 @@ def _save_deletion_chunk(buffer, output_dir, split, chunk_idx):
         'tokens': tokens
     }
 
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{split}_deletion_chunk_{chunk_idx}.pt")
     torch.save(data_chunk, output_path)
 
@@ -288,6 +289,8 @@ def _save_insertion_chunk(buffer, output_dir, split, chunk_idx, pad_token_id):  
         'tokens': tokens
     }
 
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{split}_insertion_chunk_{chunk_idx}.pt")
     torch.save(data_chunk, output_path)
 
