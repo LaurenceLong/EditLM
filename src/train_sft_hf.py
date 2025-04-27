@@ -114,7 +114,7 @@ def main():
                     help="HF checkpoint，例如 Qwen/Qwen2.5-0.5B")
     ap.add_argument("--from_file", help="从检查点文件路径加载（恢复训练状态）")
     ap.add_argument("--data_dir", default="./data/wikitext_processed",
-                    help="预处理数据目录（应包含deletion/、insertion/和*_prediction_inputs.pt）")
+                    help="预处理数据目录（应包含deletion/insertion/prediction）")
     ap.add_argument("--batch_size", type=int, default=8, help="训练批次大小（每种任务类型）")
     ap.add_argument("--steps", type=int, default=100000, help="总训练步数（所有任务）")
     ap.add_argument("--freeze", action="store_true", default=False, help="是否冻结backbone参数")
