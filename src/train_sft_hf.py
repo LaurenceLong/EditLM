@@ -415,7 +415,12 @@ def main():
             # wandb记录指标（loss、lr与当前步数）
             if args.wandb:
                 wandb.log({
-                    "loss": loss.item() * grad_accum_steps,
+                    "loss": loss.item() * grad_accum_steps,  # 整体损失（归一化前后）
+                    "index_loss": out.get("idx_loss", torch.tensor(0.0)).item() * grad_accum_steps,
+                    "token_loss": out.get("tok_loss", torch.tensor(0.0)).item() * grad_accum_steps,
+                    f"loss_{task_type}": loss.item() * grad_accum_steps,  # 整体损失（归一化前后）
+                    f"index_loss_{task_type}": out.get("idx_loss", torch.tensor(0.0)).item() * grad_accum_steps,
+                    f"token_loss_{task_type}": out.get("tok_loss", torch.tensor(0.0)).item() * grad_accum_steps,
                     "learning_rate": opt.param_groups[0]['lr'],
                     "step": step
                 }, step=step)
