@@ -154,7 +154,7 @@ def main():
     try:
         found_meta = False
         potential_paths = [
-            os.path.join(args.data_dir, "train_metadata.pt"),
+            os.path.join(args.data_dir, "deletion", "train_metadata.pt"),
             os.path.join(args.data_dir, "deletion", "train_metadata.pt"),
             os.path.join(args.data_dir, "insertion", "train_metadata.pt")
         ]
@@ -265,6 +265,7 @@ def main():
 
     # 加载数据集
     print(colored("\n=== 加载数据集 ===", "cyan"))
+    prediction_dir = os.path.join(args.data_dir, "prediction")
     deletion_dir = os.path.join(args.data_dir, "deletion")
     insertion_dir = os.path.join(args.data_dir, "insertion")
 
@@ -277,7 +278,7 @@ def main():
         # 如果不跳过预测任务
         if not cfg.skip_prediction:
             print("加载预测任务数据集...")
-            prediction_dataset = PredictionTaskDataset(args.data_dir, "train", cfg.seq_len, shuffle=True)
+            prediction_dataset = PredictionTaskDataset(prediction_dir, "train", cfg.seq_len, shuffle=True)
             task_datasets["prediction"] = prediction_dataset
             task_loaders["prediction"] = DataLoader(
                 prediction_dataset, batch_size=cfg.batch_size, shuffle=True,
@@ -307,7 +308,7 @@ def main():
     except FileNotFoundError as e:
         print(colored(f"加载数据集时出错: {e}", "red"))
         print("请确保预处理已完成，所有数据目录/文件都存在。")
-        print(f"检查路径: {deletion_dir}, {insertion_dir}, {args.data_dir}/*_prediction_inputs.pt")
+        print(f"检查路径: {deletion_dir}, {insertion_dir}, {prediction_dir}")
         return
 
     # 检查数据集是否为空
