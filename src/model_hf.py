@@ -237,91 +237,72 @@ class EditLMHF(nn.Module):
 
     def _build_gap_state(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
-        Build representation for each possible gap position, combining local and global context.
-        Handles GQA/MQA correctly.
-
-        Args:
-            hidden_states: Last layer hidden states [B, L, D]
-
-        Returns:
-            Fused gap representation [B, L+1, D]
+        构建融合 local 与 global 表示的 GAP 状态，修改重点：
+        1. triple_proj 后加上 center_context 作为 residual 连接，
+           并对 gap_local 应用 LayerNorm；
+        2. global_ctx 同样在计算后加上 LayerNorm；
+        3. 融合时对 fuse_proj 输出添加 triple residual（gap_local + global_ctx），再层归一化。
         """
+        import torch.nn.functional as F
+
         batch_size, seq_len, hidden_dim = hidden_states.shape
         dtype = hidden_states.dtype
 
-        # 1. Build local triplet representation [left, gap, right]
+        # --- Step 1: 构造本地三元组表示：left, gap, right ---
         padding = self.boundary_embed.expand(batch_size, -1, -1).to(dtype=dtype)
-
-        # Create left, right and center contexts
         left_context = torch.cat([padding, hidden_states], dim=1)  # [B, L+1, D]
         right_context = torch.cat([hidden_states, padding], dim=1)  # [B, L+1, D]
-        center_context = self.gap_token_embed.expand(
-            batch_size, seq_len + 1, hidden_dim).to(dtype=dtype)  # [B, L+1, D]
+        center_context = self.gap_token_embed.expand(batch_size, seq_len + 1, hidden_dim).to(dtype=dtype)  # [B, L+1, D]
 
-        # Combine and project local representation
         local_triple = torch.cat([left_context, center_context, right_context], dim=-1)  # [B, L+1, 3*D]
+
+        # --- Step 2: Local Projection + Residual + LN ---
         gap_local = self.triple_proj(local_triple)  # [B, L+1, D]
+        gap_local = gap_local + center_context  # 加上 residual（推荐也可试用 left_context 或某种变换后的组合）
+        gap_local = F.layer_norm(gap_local, (self.hidden_size,))  # LayerNorm
 
-        # 2. Calculate global context if attention projections are available
-        # --- MODIFIED: Check for num_kv_heads as well ---
+        # --- Step 3: Global Context 计算（保持原有注意力计算逻辑，并对结果加 LN） ---
         if not all([self.q_proj, self.k_proj, self.v_proj, self.o_proj, self.num_heads, self.num_kv_heads]):
-            # Fall back to zeros if global context unavailable
             raise RuntimeError("Global context disabled due to missing projections or head counts.")
-        else:
-            # --- MODIFIED: GQA/MQA Handling ---
-            if hidden_dim % self.num_heads != 0:
-                raise ValueError(
-                    f"hidden_size {hidden_dim} must be divisible by num_heads (query heads) {self.num_heads}")
-            head_dim = hidden_dim // self.num_heads  # Calculate head_dim based on query heads
 
-            # Project queries, keys and values
-            query = self.q_proj(gap_local)  # [B, L+1, D] (D = num_heads * head_dim)
-            key = self.k_proj(hidden_states)  # [B, L, D_kv] (D_kv = num_kv_heads * head_dim)
-            value = self.v_proj(hidden_states)  # [B, L, D_kv]
+        head_dim = hidden_dim // self.num_heads
+        query = self.q_proj(gap_local)  # [B, L+1, D]
+        key = self.k_proj(hidden_states)  # [B, L, D_kv]
+        value = self.v_proj(hidden_states)  # [B, L, D_kv]
 
-            # Reshape for multi-head attention
-            def split_heads(tensor, num_target_heads, head_dim):
-                """Splits hidden_size into num_heads x head_dim"""
-                B, S, D_tensor = tensor.shape
-                # Ensure tensor dimension matches expected num_heads * head_dim
-                if D_tensor != num_target_heads * head_dim:
-                    raise ValueError(
-                        f"Tensor dimension {D_tensor} does not match num_target_heads {num_target_heads} * head_dim {head_dim}")
-                return tensor.view(B, S, num_target_heads, head_dim).transpose(1, 2)
+        def split_heads(tensor, num_target_heads, head_dim):
+            B, S, D_tensor = tensor.shape
+            if D_tensor != num_target_heads * head_dim:
+                raise ValueError("Tensor dimension does not match expected num_heads * head_dim")
+            return tensor.view(B, S, num_target_heads, head_dim).transpose(1, 2)
 
-            # Split heads using respective head counts
-            query_split = split_heads(query, self.num_heads, head_dim)  # [B, H_q, L+1, d]
-            key_split = split_heads(key, self.num_kv_heads, head_dim)  # [B, H_kv, L, d]
-            value_split = split_heads(value, self.num_kv_heads, head_dim)  # [B, H_kv, L, d]
+        query_split = split_heads(query, self.num_heads, head_dim)  # [B, H_q, L+1, d]
+        key_split = split_heads(key, self.num_kv_heads, head_dim)  # [B, H_kv, L, d]
+        value_split = split_heads(value, self.num_kv_heads, head_dim)  # [B, H_kv, L, d]
 
-            # Handle GQA/MQA: Repeat K/V heads if necessary
-            if self.num_kv_heads != self.num_heads:
-                if self.num_heads % self.num_kv_heads != 0:
-                    raise ValueError(
-                        f"num_heads ({self.num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads}) for GQA/MQA")
-                repeat_factor = self.num_heads // self.num_kv_heads
-                # print(f"Applying GQA/MQA: Repeating K/V heads by {repeat_factor}")
-                key_split = key_split.repeat_interleave(repeat_factor, dim=1)  # [B, H_q, L, d]
-                value_split = value_split.repeat_interleave(repeat_factor, dim=1)  # [B, H_q, L, d]
-            # --- END MODIFIED ---
+        if self.num_kv_heads != self.num_heads:
+            if self.num_heads % self.num_kv_heads != 0:
+                raise ValueError("num_heads must be divisible by num_kv_heads for GQA/MQA")
+            repeat_factor = self.num_heads // self.num_kv_heads
+            key_split = key_split.repeat_interleave(repeat_factor, dim=1)  # [B, H_q, L, d]
+            value_split = value_split.repeat_interleave(repeat_factor, dim=1)  # [B, H_q, L, d]
 
-            # Apply scaled dot-product attention
-            # scaled_dot_product_attention handles broadcasting if shapes match after repeat_interleave
-            attn_output = F.scaled_dot_product_attention(
-                query_split, key_split, value_split,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=False  # We want the GAP state to attend to all context tokens
-            )  # [B, H_q, L+1, d]
+        attn_output = F.scaled_dot_product_attention(
+            query_split, key_split, value_split,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False  # 非因果，允许 GAP-attention 关注全局
+        )  # [B, H_q, L+1, d]
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len + 1, hidden_dim)
+        global_ctx = self.o_proj(attn_output)  # [B, L+1, D]
+        global_ctx = F.layer_norm(global_ctx, (self.hidden_size,))  # 应用 LN
 
-            # Reshape and project output
-            attn_output = attn_output.transpose(1, 2).contiguous().view(
-                batch_size, seq_len + 1, hidden_dim)  # [B, L+1, D]
-            global_ctx = self.o_proj(attn_output)  # [B, L+1, D]
-
-        # 3. Fuse local and global representations
+        # --- Step 4: 融合 local 与 global 信息，
+        # 在 fuse_proj 后加入 residual（将 gap_local 与 global_ctx 叠加），并再做一次 LN ---
         fused_input = torch.cat([gap_local, global_ctx], dim=-1)  # [B, L+1, 2*D]
         fused_gap_state = self.fuse_proj(fused_input)  # [B, L+1, D]
+        fused_gap_state = fused_gap_state + gap_local + global_ctx  # Residual 融合
+        fused_gap_state = F.layer_norm(fused_gap_state, (self.hidden_size,))
 
         return fused_gap_state
 
