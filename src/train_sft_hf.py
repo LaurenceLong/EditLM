@@ -47,30 +47,46 @@ def set_trainable_parts(model: EditLMHF, phase: str, freeze_backbone=True):
 
     if phase == 'editing':
         print(colored("设置编辑阶段的可训练部分（编辑头/投影层/嵌入）", "cyan"))
+        # # === version 1 ===
+        # # 确保编辑相关的组件可训练
+        # trainable_components = [
+        #     model.index_head, model.edit_head,
+        #     model.triple_proj, model.fuse_proj,
+        # ]
+        #
+        # # 处理可学习的embedding参数
+        # if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter):
+        #     model.gap_token_embed.requires_grad_(True)
+        #     print("已解冻 gap_token_embed")
+        # elif hasattr(model, 'gap_token_embed'):  # 如果是module
+        #     trainable_components.append(model.gap_token_embed)
+        #
+        # if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed, nn.Parameter):
+        #     model.boundary_embed.requires_grad_(True)
+        #     print("已解冻 boundary_embed")
+        # elif hasattr(model, 'boundary_embed'):  # 如果是module
+        #     trainable_components.append(model.boundary_embed)
+        #
+        # # 计算可训练参数
+        # unfrozen_count = 0
+        # component_names = ["index_head", "edit_head", "triple_proj", "fuse_proj", "gap_token_embed", "boundary_embed"]
 
-        # 确保编辑相关的组件可训练
+        # # === version 2 ===
         trainable_components = [
             model.index_head, model.edit_head,
-            model.gap_encoder
-            # model.triple_proj, model.fuse_proj
+            model.gap_encoder,
         ]
-
         # 处理可学习的embedding参数
         if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter):
             model.gap_token_embed.requires_grad_(True)
             print("已解冻 gap_token_embed")
         elif hasattr(model, 'gap_token_embed'):  # 如果是module
             trainable_components.append(model.gap_token_embed)
-
-        if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed, nn.Parameter):
-            model.boundary_embed.requires_grad_(True)
-            print("已解冻 boundary_embed")
-        elif hasattr(model, 'boundary_embed'):  # 如果是module
-            trainable_components.append(model.boundary_embed)
-
         # 计算可训练参数
         unfrozen_count = 0
-        component_names = ["index_head", "edit_head", "triple_proj", "fuse_proj", "gap_token_embed", "boundary_embed"]
+        component_names = ["index_head", "edit_head", "gap_encoder"]
+
+        # common
         for i, component in enumerate(trainable_components):
             if component is not None:
                 if isinstance(component, nn.Module):
@@ -85,8 +101,7 @@ def set_trainable_parts(model: EditLMHF, phase: str, freeze_backbone=True):
         # 添加单独处理的Parameter计数
         if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter) and model.gap_token_embed.requires_grad:
             unfrozen_count += model.gap_token_embed.numel()
-        if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed, nn.Parameter) and model.boundary_embed.requires_grad:
-            unfrozen_count += model.boundary_embed.numel()
+
     else:
         warnings.warn(f"未知的训练阶段 '{phase}'，没有设置可训练参数。")
 

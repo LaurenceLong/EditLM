@@ -85,7 +85,7 @@ class EditLMHF(nn.Module):
     1. Backbone (e.g., Qwen) 提取最后一层 hidden_states。
     2. 将 hidden_states 序列与 GAP 占位符交错组成序列形成:
          [gap0, tok0, gap1, tok1, ..., gap(L-1), tok(L-1), gapL]
-       其中 GAP 位置均使用 learnable gap_token。
+       其中 GAP 位置均使用 learnable gap_token_embed。
     3. 将交错序列输入轻量级的 GapEncoder (Transformer Encoder)。
     4. 从 GapEncoder 的输出中提取 GAP 位置的表示，作为最终的 gap_state（形状 [B, L+1, D]）。
     5. 使用 index_head 和 edit_head 在 gap_state 上进行预测。
@@ -114,9 +114,9 @@ class EditLMHF(nn.Module):
         self.index_loss_weight = index_loss_weight
 
         # 定义可学习的 gap token，用于初始化 gap 表示（形状 [1, D]）
-        self.gap_token = nn.Parameter(torch.zeros(1, self.hidden_size))
-        # 尝试使用 kaiming_uniform 初始化 gap_token
-        nn.init.kaiming_uniform_(self.gap_token, a=math.sqrt(5))
+        self.gap_token_embed = nn.Parameter(torch.zeros(1, self.hidden_size))
+        # 尝试使用 kaiming_uniform 初始化 gap_token_embed
+        nn.init.kaiming_uniform_(self.gap_token_embed, a=math.sqrt(5))
 
         # --- 新增 GapEncoder ---
         self.gap_encoder = GapEncoder(
@@ -185,8 +185,8 @@ class EditLMHF(nn.Module):
         device = hidden_states.device
         dtype = hidden_states.dtype
 
-        # 1. 创建 GAP 占位符：使用可学习的 gap_token (shape: [1, D]) 扩展为 [B, 1, D]
-        gap_placeholder = self.gap_token.expand(batch_size, 1, hidden_dim)
+        # 1. 创建 GAP 占位符：使用可学习的 gap_token_embed (shape: [1, D]) 扩展为 [B, 1, D]
+        gap_placeholder = self.gap_token_embed.expand(batch_size, 1, hidden_dim)
 
         # 2. 构建交错序列 [gap0, tok0, gap1, tok1, ..., gap(L-1), tok(L-1), gapL]
         # 创建用于 token 之间的 gap，重复 gap_placeholder [B, L, D]
