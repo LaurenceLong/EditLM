@@ -108,8 +108,10 @@ def main():
 
             # 预测任务 - 为序列中的每个位置生成预测样本
             seq_len = len(original_seq)
+            if seq_len <= 1:
+                continue
             num_to_predict = max(1, int(seq_len * args.prediction_ratio))
-            predict_positions = sorted(random.sample(range(args.seq_len - 1), num_to_predict))
+            predict_positions = sorted(random.sample(range(1, args.seq_len - 1), num_to_predict))
 
             for pos in predict_positions:
                 # 位置是当前token，预测的是下一个token
