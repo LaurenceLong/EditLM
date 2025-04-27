@@ -14,6 +14,8 @@ EXCLUDE_DIRS = {
     'node_modules',
     'build',
     'dist',
+    'checkpoints',
+    'data',
     # 添加其他你想要排除的目录
 }
 
@@ -23,11 +25,14 @@ EXCLUDE_FILES = {
     'assemble.py',
     'disassemble.py',
     'response.txt',
-    # 'data.py',
-    # 'evaluate.py',
-    # 'inference.py',
-    # 'preprocess_data.py',
-    # 'test_tokenization.py',
+    'data.py',
+    'evaluate.py',
+    'inference.py',
+    'preprocess_data.py',
+    'test_hf_model.py',
+    'test_tokenization.py',
+    'utils.py',
+    'README.md'
     # 添加其他你想要排除的文件
 }
 

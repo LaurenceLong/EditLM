@@ -55,11 +55,13 @@ class EditLMHF(nn.Module):
         # Output heads
         self.index_head = nn.Linear(self.hidden_size, 1, bias=False)  # Predicts edit position
         self.edit_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)  # Predicts edited token
+        self.edit_head.weight.data.copy_(self.backbone.lm_head.weight.data)
+        self.edit_head.bias.data.copy_(self.backbone.lm_head.bias.data)
 
     def _find_and_share_attn_projections(self, config: PretrainedConfig, freeze: bool):
         """
         Find and share attention projection layers from the backbone's last layer.
-        Handles GQA/MQA by storing separate query and key/value head counts.
+        Handles GQA/MQA by storing separate query and key/value head countsnew_params.
         """
         self.q_proj, self.k_proj, self.v_proj, self.o_proj = None, None, None, None
         # --- MODIFIED ---
