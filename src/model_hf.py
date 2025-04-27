@@ -1,3 +1,4 @@
+import math
 from typing import Optional, Dict
 
 import torch
@@ -59,7 +60,6 @@ class GapEncoder(nn.Module):
         Args:
             x: 输入序列 [B, L_interleaved, D_in]
             src_key_padding_mask: 可选的 padding mask [B, L_interleaved] (True 表示 padding)
-
         Returns:
             编码后的序列 [B, L_interleaved, D_in]
         """
@@ -83,9 +83,11 @@ class EditLMHF(nn.Module):
 
     架构:
     1. Backbone (e.g., Qwen) 提取最后一层 hidden_states。
-    2. 将 hidden_states 序列插入 GAP 占位符，形成 [gap0, tok0, gap1, tok1, ..., gapL] 的交错序列。
+    2. 将 hidden_states 序列与 GAP 占位符交错组成序列形成:
+         [gap0, tok0, gap1, tok1, ..., gap(L-1), tok(L-1), gapL]
+       其中 GAP 位置均使用 learnable gap_token。
     3. 将交错序列输入轻量级的 GapEncoder (Transformer Encoder)。
-    4. 从 GapEncoder 的输出中提取 GAP 位置的表示，作为最终的 gap_state。
+    4. 从 GapEncoder 的输出中提取 GAP 位置的表示，作为最终的 gap_state（形状 [B, L+1, D]）。
     5. 使用 index_head 和 edit_head 在 gap_state 上进行预测。
     """
 
@@ -96,12 +98,13 @@ class EditLMHF(nn.Module):
                  gap_encoder_heads: int = 8):
         super().__init__()
 
-        print(f"Initializing EditLMHF_New with base model: {base_model}")
+        print(f"Initializing EditLMHF with base model: {base_model}")
         self.backbone = AutoModelForCausalLM.from_pretrained(
             base_model,
             low_cpu_mem_usage=True,
         )
 
+        # 根据任务需求可选择冻结 backbone
         self.backbone.requires_grad_(True)
 
         # Basic attributes
@@ -109,6 +112,11 @@ class EditLMHF(nn.Module):
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size  # Backbone 的隐藏层维度 (D)
         self.index_loss_weight = index_loss_weight
+
+        # 定义可学习的 gap token，用于初始化 gap 表示（形状 [1, D]）
+        self.gap_token = nn.Parameter(torch.zeros(1, self.hidden_size))
+        # 尝试使用 kaiming_uniform 初始化 gap_token
+        nn.init.kaiming_uniform_(self.gap_token, a=math.sqrt(5))
 
         # --- 新增 GapEncoder ---
         self.gap_encoder = GapEncoder(
@@ -130,10 +138,8 @@ class EditLMHF(nn.Module):
         lm_head = self.backbone.get_output_embeddings()  # 更通用的获取方式
         if lm_head is not None and isinstance(lm_head, nn.Linear):
             print("Initializing edit_head with lm_head weights...")
-            # 确保权重形状匹配
             if self.edit_head.weight.shape == lm_head.weight.shape:
                 self.edit_head.weight.data.copy_(lm_head.weight.data)
-                # 处理 bias (如果存在且匹配)
                 if hasattr(lm_head, 'bias') and lm_head.bias is not None:
                     if hasattr(self.edit_head, 'bias') and self.edit_head.bias is not None:
                         if self.edit_head.bias.shape == lm_head.bias.shape:
@@ -147,14 +153,11 @@ class EditLMHF(nn.Module):
             else:
                 print(
                     f"Warning: edit_head shape {self.edit_head.weight.shape} mismatch with lm_head shape {lm_head.weight.shape}. edit_head remains randomly initialized.")
-
         elif self.backbone.config.tie_word_embeddings and hasattr(self.backbone, 'get_input_embeddings'):
-            # 处理权重绑定(tie_word_embeddings)的情况
             input_embeds = self.backbone.get_input_embeddings()
             if input_embeds is not None and self.edit_head.weight.shape == input_embeds.weight.shape:
                 print("Initializing edit_head with input embedding weights (due to tied weights)...")
                 self.edit_head.weight.data.copy_(input_embeds.weight.data)
-                # 通常绑定权重时没有 bias
                 if hasattr(self.edit_head, 'bias') and self.edit_head.bias is not None:
                     print(
                         "Warning: edit_head has bias, but weights are tied (usually no bias). Bias remains initialized.")
@@ -182,58 +185,46 @@ class EditLMHF(nn.Module):
         device = hidden_states.device
         dtype = hidden_states.dtype
 
-        # 1. 创建 GAP 占位符 (使用 0 向量初始化)
-        # 我们需要 L+1 个 GAP 位置
-        gap_placeholder = torch.zeros((batch_size, 1, hidden_dim), device=device, dtype=dtype)
+        # 1. 创建 GAP 占位符：使用可学习的 gap_token (shape: [1, D]) 扩展为 [B, 1, D]
+        gap_placeholder = self.gap_token.expand(batch_size, 1, hidden_dim)
 
         # 2. 构建交错序列 [gap0, tok0, gap1, tok1, ..., gap(L-1), tok(L-1), gapL]
-        # 目标长度: 2 * L + 1
-        # 创建 L 个 gap (用于 token 之间)
+        # 创建用于 token 之间的 gap，重复 gap_placeholder [B, L, D]
         expanded_gaps = gap_placeholder.expand(batch_size, seq_len, hidden_dim)  # [B, L, D]
-
-        # 使用 stack 和 reshape 进行交错
-        # stacked: [B, L, 2, D] -> [[g0, t0], [g1, t1], ...]
+        # 将 gap tokens 与 hidden_states 交错堆叠
+        # stacked: [B, L, 2, D]，每个位置依次为 [gap, token]
         stacked = torch.stack([expanded_gaps, hidden_states], dim=2)
-
-        # interleaved_part: [B, 2L, D] -> [g0, t0, g1, t1, ...]
+        # 展平得到 [B, 2L, D]
         interleaved_part = stacked.view(batch_size, 2 * seq_len, hidden_dim)
-
-        # 添加最后一个 gap (gapL)
-        # final_gap: [B, 1, D]
-        final_gap = gap_placeholder
+        # 添加最后一个 GAP (gapL)
+        final_gap = gap_placeholder  # [B, 1, D]
         interleaved_sequence = torch.cat([interleaved_part, final_gap], dim=1)  # [B, 2L+1, D]
 
         # 3. 构建 GapEncoder 的 padding mask
         # Backbone 的 attention_mask [B, L] (1=有效, 0=pad)
-        # 我们需要为交错序列 [B, 2L+1] 创建 mask
-        # GAP 位置总是有效的 (mask=1)，Token 位置的有效性取决于原始 attention_mask
+        # 我们需要为交错序列 [B, 2L+1] 创建 mask，
+        # GAP 位置总是有效 (mask=1)，Token 位置的有效性取决于原始 attention_mask
         encoder_mask = None
         if attention_mask is not None:
             # GAP mask: 全 1 [B, L+1]
-            gap_mask = torch.ones((batch_size, seq_len + 1), device=device, dtype=torch.bool)  # True = 有效
+            gap_mask = torch.ones((batch_size, seq_len + 1), device=device, dtype=torch.bool)
             # Token mask: [B, L]
-            token_mask = attention_mask.bool()  # 转换为 bool
+            token_mask = attention_mask.bool()
 
-            # 交错 mask
-            # stacked_mask: [B, L, 2] -> [[True, mask0], [True, mask1], ...]
-            stacked_mask = torch.stack([gap_mask[:, :-1], token_mask], dim=2)  # 使用前 L 个 gap mask
-            # interleaved_mask_part: [B, 2L] -> [True, mask0, True, mask1, ...]
-            interleaved_mask_part = stacked_mask.view(batch_size, 2 * seq_len)
-            # 添加最后一个 gap 的 mask (总是 True)
+            # 构造交错 mask：依次为 [True, token_mask[0], True, token_mask[1], ...]
+            stacked_mask = torch.stack([gap_mask[:, :-1], token_mask], dim=2)  # [B, L, 2]
+            interleaved_mask_part = stacked_mask.view(batch_size, 2 * seq_len)  # [B, 2L]
             final_gap_mask = gap_mask[:, -1:]  # [B, 1]
             full_mask = torch.cat([interleaved_mask_part, final_gap_mask], dim=1)  # [B, 2L+1]
 
-            # TransformerEncoder 需要 padding mask (True 表示 *无效* 位置)
-            # 所以我们需要反转 full_mask
-            encoder_mask = ~full_mask  # [B, 2L+1], True 表示 padding/无效
+            # TransformerEncoder 要求 padding mask: True 表示该位置无效
+            encoder_mask = ~full_mask  # [B, 2L+1]
 
-        # 4. 通过 GapEncoder 处理
-        # encoded_sequence: [B, 2L+1, D]
-        encoded_sequence = self.gap_encoder(interleaved_sequence, src_key_padding_mask=encoder_mask)
+        # 4. 通过 GapEncoder 处理交错序列
+        encoded_sequence = self.gap_encoder(interleaved_sequence, src_key_padding_mask=encoder_mask)  # [B, 2L+1, D]
 
-        # 5. 提取 GAP 位置的表示 (索引 0, 2, 4, ..., 2L)
-        # gap_state: [B, L+1, D]
-        gap_state = encoded_sequence[:, 0::2, :]
+        # 5. 提取 GAP 位置的表示 (偶数位: 索引 0, 2, 4, ..., 2L)
+        gap_state = encoded_sequence[:, 0::2, :]  # [B, L+1, D]
 
         return gap_state
 
@@ -246,13 +237,12 @@ class EditLMHF(nn.Module):
         """
         前向传播：
           - 使用 GapEncoder 生成 gap state。
-          - 训练模式：使用 edit_head 计算 token loss。
+          - 训练模式：使用 edit_head 计算 token loss，同时计算 index loss。
           - 推理模式：使用 edit_head 预测 token (不再需要 lm_head 回退)。
         """
         batch_size, seq_len = input_ids.shape
 
         # 1. 获取 backbone 的输出 (只需要最后一层 hidden states)
-        # 注意：确保 backbone 配置为输出 hidden_states
         outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -262,46 +252,39 @@ class EditLMHF(nn.Module):
 
         # 兼容不同 HF 模型输出格式
         if hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
-            # 通常 hidden_states 是一个元组，最后一项是最后一层的输出
             hidden_states = outputs.hidden_states[-1]  # [B, L, D]
         elif hasattr(outputs, 'last_hidden_state'):
             hidden_states = outputs.last_hidden_state  # [B, L, D]
         else:
-            # 尝试从 BaseModelOutput 获取
             try:
-                # 对于某些模型（如纯粹的 encoder-decoder），可能需要访问 encoder 或 decoder 的输出
                 if hasattr(self.backbone, 'encoder') and hasattr(outputs, 'encoder_last_hidden_state'):
                     hidden_states = outputs.encoder_last_hidden_state
                 elif hasattr(self.backbone, 'decoder') and hasattr(outputs, 'decoder_last_hidden_state'):
-                    hidden_states = outputs.decoder_last_hidden_state  # 可能需要调整，取决于模型类型
+                    hidden_states = outputs.decoder_last_hidden_state
                 else:
-                    # 尝试直接从 outputs 字典获取
-                    hidden_states = outputs['last_hidden_state']  # 常见 key
+                    hidden_states = outputs['last_hidden_state']
             except (AttributeError, KeyError, TypeError) as e:
                 raise AttributeError(
-                    f"Could not find last hidden states in backbone output. Output keys: {outputs.keys()}. Error: {e}")
+                    f"Could not find last hidden states in backbone output. Output keys: {outputs.keys()}. Error: {e}"
+                )
 
-        # 2. 构造融合了局部与全局信息的 gap 表示 (通过 GapEncoder)
-        # 需要传入 attention_mask 来构建 GapEncoder 的 mask
-        fused_gap_state = self._build_gap_state(hidden_states, attention_mask=attention_mask)  # [B, L+1, D]
+        # 2. 构造融合了局部与全局信息的 gap 表示 (形状 [B, L+1, D])
+        fused_gap_state = self._build_gap_state(hidden_states, attention_mask=attention_mask)
 
-        # 3. 处理推理和训练两种模式
+        # 3. 根据训练/推理模式分别处理
         if target_index is None:
             # --- 推理模式 ---
             # a. 预测编辑位置
             idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
             pred_index = idx_logits.argmax(-1)  # [B]
-
-            # b. 根据预测的位置 gather gap state
+            # b. 根据预测的位置从 gap_state 中采集对应表示
             gathered_gap_state = torch.gather(
-                fused_gap_state,  # [B, L+1, D]
+                fused_gap_state,
                 dim=1,
                 index=pred_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)
             ).squeeze(1)  # [B, D]
-
-            # c. 使用 edit_head 预测 token (不再需要 lm_head 回退)
+            # c. 使用 edit_head 预测 token
             token_logits = self.edit_head(gathered_gap_state)  # [B, V]
-
             return dict(
                 index_logits=idx_logits,
                 token_logits=token_logits,
@@ -312,21 +295,17 @@ class EditLMHF(nn.Module):
             # a. 计算编辑位置预测的 logits 和 loss
             idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
             idx_loss = F.cross_entropy(idx_logits, target_index)
-
-            # b. 根据 *目标* 编辑位置 gather gap state
+            # b. 根据目标编辑位置采集 gap state 表示
             gathered_gap_state = torch.gather(
-                fused_gap_state,  # [B, L+1, D]
+                fused_gap_state,
                 dim=1,
                 index=target_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)
             ).squeeze(1)  # [B, D]
-
             # c. 使用 edit_head 计算 token logits 和 loss
             token_logits = self.edit_head(gathered_gap_state)  # [B, V]
             tok_loss = F.cross_entropy(token_logits, target_token)
-
-            # d. 计算总 loss
+            # d. 总 loss 组合
             loss = tok_loss + self.index_loss_weight * idx_loss
-
             return dict(
                 loss=loss,
                 tok_loss=tok_loss,
