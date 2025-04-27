@@ -317,24 +317,13 @@ class EditLMHF(nn.Module):
                 target_token: Optional[torch.Tensor] = None
                 ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass for both training and inference.
-
-        Args:
-            input_ids: Input sequence [B, L]
-            attention_mask: Attention mask [B, L] (optional but recommended)
-            target_index: Target edit position indices [B], range [0, L] (training only)
-            target_token: Target token IDs [B] (training only)
-
-        Returns:
-            Dict with keys:
-            - 'index_logits': Scores for each edit position [B, L+1]
-            - 'token_logits': Token prediction scores [B, V]
-            - 'loss', 'tok_loss', 'idx_loss': Losses (training only)
-            - 'pred_index': Predicted edit positions [B] (inference only)
+        前向传播：
+          - 训练模式：无论 target_index 是多少，都通过 edit_head 输出来计算 token loss
+          - 推理模式：若预测位置等于 seq_len，则使用 lm_head 的输出作为 token 预测结果
         """
         batch_size, seq_len = input_ids.shape
 
-        # 1. Get hidden states and LM logits from backbone
+        # 1. 获取 backbone 的输出和语言模型 logits
         outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -342,66 +331,45 @@ class EditLMHF(nn.Module):
             return_dict=True
         )
 
-        # Get hidden states from backbone output
         if hasattr(outputs, 'last_hidden_state'):
             hidden_states = outputs.last_hidden_state  # [B, L, D]
         elif hasattr(outputs, 'hidden_states'):
-            # Ensure we get the *last* layer's hidden states
             hidden_states = outputs.hidden_states[-1]  # [B, L, D]
         else:
-            # Try to infer hidden states if not directly available (less common)
-            # This part might need adjustment depending on the specific base model structure
-            # For now, assume standard output formats
-            raise AttributeError("Could not find 'last_hidden_state' or 'hidden_states' in backbone output.")
+            raise AttributeError("找不到 backbone 输出中的 hidden_states")
 
-        # Get language model logits
         if hasattr(outputs, 'logits'):
             lm_logits = outputs.logits  # [B, L, V]
         elif hasattr(self.backbone, 'lm_head'):
-            # Check if lm_head exists and is callable
-            if callable(getattr(self.backbone, 'lm_head', None)):
-                lm_logits = self.backbone.lm_head(hidden_states)  # [B, L, V]
-            else:
-                raise AttributeError("Found 'lm_head' but it's not callable or is None.")
+            lm_logits = self.backbone.lm_head(hidden_states)
         else:
-            # Fallback: Check if the backbone itself is the LM head (e.g., some simpler models)
-            # This is less likely for complex models like Qwen
-            # For now, raise error if standard methods fail
-            raise AttributeError("Could not find 'logits' in output or a callable 'lm_head' in backbone.")
+            raise AttributeError("找不到 lm_logits 输出")
 
-        # 2. Build gap representations with fused local and global context
+        # 2. 构造融合了局部与全局信息的 gap 表示
         fused_gap_state = self._build_gap_state(hidden_states)  # [B, L+1, D]
 
-        # 3. Inference or training logic
+        # 3. 处理推理和训练两种模式
         if target_index is None:
-            # === Inference mode ===
-            # ... (计算 fused_gap_state 和 idx_logits 的部分不变) ...
+            # 推理模式
             idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
-
-            # 1. 预测编辑位置
+            # 预测编辑位置
             pred_index = idx_logits.argmax(-1)  # [B]
-
-            # 2. 准备 lm_head 的输出 (备用)
+            # 获取 lm_head 输出备用（标准 LM 预测）
             lm_last_token = lm_logits[:, seq_len - 1, :]  # [B, V]
-
-            # 3. 创建掩码，判断是否使用 lm_head
-            #    注意：这里掩码只需要 [B] 的形状，后面再扩展
-            use_lm_mask_scalar = torch.eq(pred_index, seq_len)  # [B]
-
-            # 4. Gather *需要*计算 edit_head 的 fused_gap_state
-            # Gather the specific gap state corresponding to pred_index
+            # Gather the gap state 对应预测的位置
             gathered_gap_state = torch.gather(
                 fused_gap_state,  # [B, L+1, D]
                 dim=1,
-                index=pred_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)  # [B, 1, D] index
+                index=pred_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)
             ).squeeze(1)  # [B, D]
-
-            # Calculate edit_head *only* for the gathered state
+            # 使用 edit_head 预测 token
             gathered_edit = self.edit_head(gathered_gap_state)  # [B, V]
 
-            # 5. 使用 torch.where 结合 lm_last_token 和 gathered_edit
+            # 如果预测位置等于 seq_len，则使用 lm_head 的输出
+            # 生成一个布尔向量表示哪些样本满足条件
+            use_lm_mask_scalar = torch.eq(pred_index, seq_len)  # [B]
             final_token_logits = torch.where(
-                use_lm_mask_scalar.unsqueeze(-1),  # [B, 1] -> 扩展到 [B, V]
+                use_lm_mask_scalar.unsqueeze(-1),  # [B, 1]
                 lm_last_token,  # [B, V]
                 gathered_edit  # [B, V]
             )
@@ -411,36 +379,23 @@ class EditLMHF(nn.Module):
                 token_logits=final_token_logits,
                 pred_index=pred_index
             )
-
         else:
-            # === Training mode ===
+            # 训练模式：无论 target_index 为什么，都只用 edit_head 来进行 token loss 的计算
+
             idx_logits = self.index_head(fused_gap_state).squeeze(-1)  # [B, L+1]
 
-            # 1. 准备 lm_head 的输出 (备用)
-            lm_last_token = lm_logits[:, seq_len - 1, :]  # [B, V]
-
-            # 2. 创建掩码，判断是否使用 lm_head
-            use_lm_mask_scalar = torch.eq(target_index, seq_len)  # [B]
-
-            # 3. Gather the specific gap state corresponding to target_index
+            # Gather the gap state 对应目标编辑位置
             gathered_gap_state = torch.gather(
                 fused_gap_state,  # [B, L+1, D]
                 dim=1,
-                index=target_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)  # [B, 1, D] index
+                index=target_index.view(-1, 1, 1).expand(-1, 1, self.hidden_size)
             ).squeeze(1)  # [B, D]
 
-            # 4. Calculate edit_head *only* for the gathered state
+            # 总是通过 edit_head 计算 token 输出
             gathered_edit = self.edit_head(gathered_gap_state)  # [B, V]
-
-            # 5. 使用 torch.where 结合 lm_last_token 和 gathered_edit
-            tok_logits_for_loss = torch.where(
-                use_lm_mask_scalar.unsqueeze(-1),  # [B, 1] -> 扩展到 [B, V]
-                lm_last_token,  # [B, V]
-                gathered_edit  # [B, V]
-            )
-
-            # 6. 计算 Loss (不变)
-            tok_loss = F.cross_entropy(tok_logits_for_loss, target_token)
+            # 计算 token loss（交叉熵损失）
+            tok_loss = F.cross_entropy(gathered_edit, target_token)
+            # 计算编辑位置预测的 loss
             idx_loss = F.cross_entropy(idx_logits, target_index)
             loss = tok_loss + self.index_loss_weight * idx_loss
 
@@ -449,5 +404,5 @@ class EditLMHF(nn.Module):
                 tok_loss=tok_loss,
                 idx_loss=idx_loss,
                 index_logits=idx_logits,
-                token_logits=tok_logits_for_loss
+                token_logits=gathered_edit
             )

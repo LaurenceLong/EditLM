@@ -111,13 +111,21 @@ def main():
             # -----------------------------------------------------------------------
             # 1) 预测任务 (与旧实现一致，可一次生成多个样本)
             # -----------------------------------------------------------------------
+            # 预测任务：生成预测位置样本
             num_to_predict = max(1, int(seq_len * args.prediction_ratio))
             predict_positions = sorted(random.sample(range(1, seq_len - 1), num_to_predict))
 
             for pos in predict_positions:
                 next_token = original_seq[pos + 1]  # 目标 token
+                pred_seq = original_seq[:pos + 1]
+                # 如果长度不足，则使用pad_token_id进行补齐
+                if len(pred_seq) < args.seq_len:
+                    pred_seq = pred_seq + [tokenizer.pad_token_id] * (args.seq_len - len(pred_seq))
+                # 如果长度超长（理论上不会发生，因为original_seq长度固定），也进行截断
+                elif len(pred_seq) > args.seq_len:
+                    pred_seq = pred_seq[:args.seq_len]
                 prediction_buffer.append({
-                    "sequence": torch.tensor(original_seq[:pos + 1]),
+                    "sequence": torch.tensor(pred_seq),
                     "index": torch.tensor(pos + 1),
                     "token": torch.tensor(next_token)
                 })
@@ -133,38 +141,41 @@ def main():
             # -----------------------------------------------------------------------
             # 2) 删除任务 —— 只插入 1 个随机 token
             # -----------------------------------------------------------------------
-            # 计算删除任务的token数量（至少1个）
+            # 删除任务：先在序列中插入随机 token
             num_to_delete = max(1, int(seq_len * args.deletion_ratio))
             to_delete_positions = sorted(random.sample(range(seq_len), num_to_delete))
 
             for to_delete_pos in to_delete_positions:
                 del_seq = original_seq.copy()
                 random_token = random.randint(0, vocab_size - 1)
-    
+
                 del_seq.insert(to_delete_pos, random_token)  # 执行插入
-                if len(del_seq) > args.seq_len:  # 可能超长, 截断
+                # 如果插入后超过固定长度，则截断到args.seq_len
+                if len(del_seq) > args.seq_len:
                     del_seq = del_seq[:args.seq_len]
-    
+                # 如果插入后长度不足，也进行补齐（一般情况不会发生）
+                elif len(del_seq) < args.seq_len:
+                    del_seq = del_seq + [tokenizer.pad_token_id] * (args.seq_len - len(del_seq))
+
                 # 若截断导致缺陷 token 被裁掉，则跳过该样本
                 if to_delete_pos < len(del_seq):
                     deletion_buffer.append({
                         "sequence": torch.tensor(del_seq),
                         "index": torch.tensor(to_delete_pos),
-                        "token": torch.tensor(get_del_token_id(tokenizer))  # 0 仅作占位
+                        "token": torch.tensor(get_del_token_id(tokenizer))
                     })
                     total_deletion_samples += 1
                     if len(deletion_buffer) >= args.chunk_size:
-                        _save_deletion_chunk(
-                            deletion_buffer, deletion_dir,
-                            split, deletion_chunk_idx
-                        )
+                        _save_deletion_chunk(deletion_buffer, deletion_dir,
+                                             split, deletion_chunk_idx
+                                             )
                         deletion_chunk_idx += 1
                         deletion_buffer = []
 
             # -----------------------------------------------------------------------
             # 3) 插入任务 —— 只删除 1 个随机 token
             # -----------------------------------------------------------------------
-            # 计算插入任务的token数量（至少1个）
+            # 插入任务：先在序列中删除 1 个 token
             num_to_insert = max(1, int(seq_len * args.insertion_ratio))
             to_insert_positions = sorted(random.sample(range(seq_len), num_to_insert))
             for to_insert_pos in to_insert_positions:
@@ -173,6 +184,13 @@ def main():
                 ins_seq = original_seq.copy()
                 ins_seq.pop(to_insert_pos)  # 执行删除
 
+                # 如果删除后长度不足，使用pad_token_id进行补齐到固定长度
+                if len(ins_seq) < args.seq_len:
+                    ins_seq = ins_seq + [tokenizer.pad_token_id] * (args.seq_len - len(ins_seq))
+                # 如果意外超长，则截断（理论上不可能）
+                elif len(ins_seq) > args.seq_len:
+                    ins_seq = ins_seq[:args.seq_len]
+
                 insertion_buffer.append({
                     "sequence": torch.tensor(ins_seq),
                     "index": torch.tensor(to_insert_pos),
@@ -180,10 +198,8 @@ def main():
                 })
                 total_insertion_samples += 1
                 if len(insertion_buffer) >= args.chunk_size:
-                    _save_insertion_chunk(
-                        insertion_buffer, insertion_dir,
-                        split, insertion_chunk_idx, tokenizer.pad_token_id
-                    )
+                    _save_insertion_chunk(insertion_buffer, insertion_dir,
+                                          split, insertion_chunk_idx, tokenizer.pad_token_id)
                     insertion_chunk_idx += 1
                     insertion_buffer = []
 
