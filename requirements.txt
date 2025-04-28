@@ -1,0 +1,8 @@
+torch>=2.1      # 建议 2.x，可自动开启 SDPA
+transformers>=4.44.0
+datasets>=2.18
+accelerate
+tqdm>=4.66.4
+numpy>=1.26.4
+termcolor>=2.4.0
+wandb>=0.19.6

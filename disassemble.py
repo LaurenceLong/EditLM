@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 # 文件内容提取正则表达式
 head = "#" * 2
-FILE_PATTERN = head + r"(.*?)[\r\n]+[.\r\n]*```.*?\n(.*?)```"
+FILE_PATTERN = "\n" + head + r" (.*?)[\r\n]+[.\r\n]*```.*?\n(.*?)```"
 
 
 def extract_files_from_content(content):
