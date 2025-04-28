@@ -46,47 +46,29 @@ def set_trainable_parts(model: EditLMHF, phase: str, freeze_backbone=True):
         print(colored("保持backbone参数可训练", "green"))
 
     if phase == 'editing':
-        print(colored("设置编辑阶段的可训练部分（编辑头/投影层/嵌入）", "cyan"))
-        # === version 1 ===
-        # 确保编辑相关的组件可训练
+        print(colored("设置编辑阶段的可训练部分（编辑头/MLP/嵌入）", "cyan"))
+        # 根据新模型架构调整可训练组件
         trainable_components = [
             model.index_head, model.edit_head,
-            model.triple_proj, model.fuse_proj,
+            model.triple_mlp, model.fuse_mlp,  # 新的MLP替代旧的投影层
+            model.pre_head_ln, model.edit_dropout  # 新增的LayerNorm和Dropout
         ]
 
         # 处理可学习的embedding参数
         if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter):
             model.gap_token_embed.requires_grad_(True)
             print("已解冻 gap_token_embed")
-        elif hasattr(model, 'gap_token_embed'):  # 如果是module
-            trainable_components.append(model.gap_token_embed)
 
         if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed, nn.Parameter):
             model.boundary_embed.requires_grad_(True)
             print("已解冻 boundary_embed")
-        elif hasattr(model, 'boundary_embed'):  # 如果是module
-            trainable_components.append(model.boundary_embed)
 
         # 计算可训练参数
         unfrozen_count = 0
-        component_names = ["index_head", "edit_head", "triple_proj", "fuse_proj", "gap_token_embed", "boundary_embed"]
+        component_names = ["index_head", "edit_head", "triple_mlp", "fuse_mlp", "pre_head_ln", "edit_dropout",
+                           "gap_token_embed", "boundary_embed"]
 
-        # # === version 2 ===
-        # trainable_components = [
-        #     model.index_head, model.edit_head,
-        #     model.gap_encoder,
-        # ]
-        # # 处理可学习的embedding参数
-        # if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter):
-        #     model.gap_token_embed.requires_grad_(True)
-        #     print("已解冻 gap_token_embed")
-        # elif hasattr(model, 'gap_token_embed'):  # 如果是module
-        #     trainable_components.append(model.gap_token_embed)
-        # # 计算可训练参数
-        # unfrozen_count = 0
-        # component_names = ["index_head", "edit_head", "gap_encoder"]
-
-        # common
+        # 设置各组件为可训练
         for i, component in enumerate(trainable_components):
             if component is not None:
                 if isinstance(component, nn.Module):
@@ -99,8 +81,12 @@ def set_trainable_parts(model: EditLMHF, phase: str, freeze_backbone=True):
                         print(f"已解冻 {component_name} ({unfrozen_count - count_before} 参数)")
 
         # 添加单独处理的Parameter计数
-        if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed, nn.Parameter) and model.gap_token_embed.requires_grad:
+        if hasattr(model, 'gap_token_embed') and isinstance(model.gap_token_embed,
+                                                            nn.Parameter) and model.gap_token_embed.requires_grad:
             unfrozen_count += model.gap_token_embed.numel()
+        if hasattr(model, 'boundary_embed') and isinstance(model.boundary_embed,
+                                                           nn.Parameter) and model.boundary_embed.requires_grad:
+            unfrozen_count += model.boundary_embed.numel()
 
     else:
         warnings.warn(f"未知的训练阶段 '{phase}'，没有设置可训练参数。")
@@ -145,6 +131,8 @@ def main():
     # 添加 wandb 参数
     ap.add_argument("--wandb", action="store_true", help="是否启用 wandb 监控训练过程")
     ap.add_argument("--wandb_project", type=str, default="EditLM", help="wandb 项目名称")
+    # 为新模型添加dropout参数
+    ap.add_argument("--edit_dropout", type=float, default=0.1, help="编辑预测头的dropout概率")
     args = ap.parse_args()
 
     # 初始化 wandb
@@ -172,6 +160,7 @@ def main():
         seq_len = None  # 将从元数据加载
         grad_accum_steps = args.grad_accum
         skip_prediction = args.skip_prediction
+        edit_dropout = args.edit_dropout  # 添加dropout配置
 
     cfg = Config()
 
@@ -240,7 +229,12 @@ def main():
     if model is None:
         print("加载新的 Tokenizer 和 Model...")
         tokenizer = get_tokenizer(args.base, use_fast=True)
-        model = EditLMHF(base_model=args.base, index_loss_weight=1.0).to(device)
+        # 使用新的dropout参数创建模型
+        model = EditLMHF(
+            base_model=args.base,
+            index_loss_weight=1.0,
+            edit_dropout_prob=cfg.edit_dropout
+        ).to(device)
 
     del_token_id = get_del_token_id(tokenizer)  # 用于DeletionTaskDataset
     # --- Create the collate function ---
@@ -279,7 +273,8 @@ def main():
                     # 正确推进调度器
                     target_lr_ratio = (
                         min(start_step / cfg.warmup_steps,
-                            0.5 * (1 + math.cos(math.pi * (start_step - cfg.warmup_steps) / (cfg.total_steps - cfg.warmup_steps))))
+                            0.5 * (1 + math.cos(
+                                math.pi * (start_step - cfg.warmup_steps) / (cfg.total_steps - cfg.warmup_steps))))
                         if start_step > cfg.warmup_steps
                         else start_step / cfg.warmup_steps
                     )
