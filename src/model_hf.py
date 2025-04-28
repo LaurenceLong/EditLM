@@ -251,6 +251,7 @@ class EditLMHF(nn.Module):
         gap_local = self.triple_mlp(local_triple) + self.boundary_embed.expand(batch_size, seq_len + 1, -1).to(
             dtype=dtype)  # [B, L+1, D]
 
+        print(">>> gap_local.norm():", gap_local.detach().norm().item())
         # 2. Calculate global context using backbone's attention mechanism
         global_ctx = None  # Initialize global context
         if all([self.q_proj, self.k_proj, self.v_proj, self.o_proj, self.num_heads, self.num_kv_heads]):
@@ -296,6 +297,7 @@ class EditLMHF(nn.Module):
                 attn_output = attn_output.transpose(1, 2).contiguous().view(
                     batch_size, seq_len + 1, hidden_dim)  # [B, L+1, D]
                 global_ctx = self.o_proj(attn_output)  # [B, L+1, D]
+                print(">>> global_ctx.norm():", global_ctx.detach().norm().item())
 
             except Exception as e:
                 warnings.warn(f"Error during global context calculation: {e}. Global context disabled for this batch.")

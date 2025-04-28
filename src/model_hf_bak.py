@@ -261,7 +261,6 @@ class EditLMHF(nn.Module):
         # Combine and project local representation
         local_triple = torch.cat([left_context, center_context, right_context], dim=-1)  # [B, L+1, 3*D]
         gap_local = self.triple_proj(local_triple)  # [B, L+1, D]
-        print(">>> gap_local.norm():", gap_local.detach().norm().item())
 
         # 2. Calculate global context if attention projections are available
         # --- MODIFIED: Check for num_kv_heads as well ---
@@ -319,7 +318,6 @@ class EditLMHF(nn.Module):
             attn_output = attn_output.transpose(1, 2).contiguous().view(
                 batch_size, seq_len + 1, hidden_dim)  # [B, L+1, D]
             global_ctx = self.o_proj(attn_output)  # [B, L+1, D]
-            print(">>> global_ctx.norm():", global_ctx.detach().norm().item())
 
         # 3. Fuse local and global representations
         fused_input = torch.cat([gap_local, global_ctx], dim=-1)  # [B, L+1, 2*D]
